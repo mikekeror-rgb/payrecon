@@ -50,3 +50,18 @@ SELECT expect_fail('inbox: the same payload hash twice (a redelivery)', $$INSERT
 SELECT expect_fail('inbox: unknown kind', $$INSERT INTO webhook_inbox (payload_sha256, kind, received_at, payload, status) VALUES ('h2','validation',now(),'{}','RECEIVED')$$);
 SELECT expect_fail('inbox: unknown status', $$INSERT INTO webhook_inbox (payload_sha256, kind, received_at, payload, status) VALUES ('h3','stk',now(),'{}','DONE')$$);
 SELECT expect_ok('inbox: a quarantined item with a reason', $$INSERT INTO webhook_inbox (payload_sha256, kind, received_at, payload, status, detail) VALUES ('h4','c2b',now(),'{}','QUARANTINED','amount differs')$$);
+
+SELECT expect_ok('inbox: a payroll (B2C) result', $$INSERT INTO webhook_inbox (payload_sha256, kind, received_at, payload, status) VALUES ('h5','b2c-result',now(),'{}','RECEIVED')$$);
+SELECT expect_ok('payroll: a draft batch', $$INSERT INTO payout_batches (batch_id,status,total,lines,created_by,created_at) VALUES ('W43','DRAFT',2700,2,'mike',now())$$);
+SELECT expect_fail('payroll: approved without saying who approved', $$UPDATE payout_batches SET status='APPROVED' WHERE batch_id='W43'$$);
+SELECT expect_ok('payroll: approved by a person', $$UPDATE payout_batches SET status='APPROVED', approved_by='mike', approved_at=now() WHERE batch_id='W43'$$);
+SELECT expect_ok('payroll: line 2', $$INSERT INTO payouts (payout_id,batch_id,line_no,name,payee_key,msisdn_enc,msisdn_masked,amount,status,created_at,updated_at) VALUES ('W43:2','W43',2,'Grace','pk1','enc','2547****678',1500,'QUEUED',now(),now())$$);
+SELECT expect_fail('payroll: the same person twice in one batch', $$INSERT INTO payouts (payout_id,batch_id,line_no,name,payee_key,msisdn_enc,msisdn_masked,amount,status,created_at,updated_at) VALUES ('W43:9','W43',9,'Grace again','pk1','enc','2547****678',1500,'QUEUED',now(),now())$$);
+SELECT expect_fail('payroll: cents', $$INSERT INTO payouts (payout_id,batch_id,line_no,name,payee_key,msisdn_enc,msisdn_masked,amount,status,created_at,updated_at) VALUES ('W43:3','W43',3,'Peter','pk2','enc','2547****111',1200.50,'QUEUED',now(),now())$$);
+SELECT expect_fail('payroll: a line for a batch that does not exist', $$INSERT INTO payouts (payout_id,batch_id,line_no,name,payee_key,msisdn_enc,msisdn_masked,amount,status,created_at,updated_at) VALUES ('X:2','X',2,'Peter','pk2','enc','2547****111',1200,'QUEUED',now(),now())$$);
+SELECT expect_ok('payroll: line 3', $$INSERT INTO payouts (payout_id,batch_id,line_no,name,payee_key,msisdn_enc,msisdn_masked,amount,status,created_at,updated_at,originator_conversation_id) VALUES ('W43:3','W43',3,'Peter','pk2','enc','2547****111',1200,'SENDING',now(),now(),'W43:3:1')$$);
+SELECT expect_fail('payroll: one request id used for two lines', $$UPDATE payouts SET originator_conversation_id='W43:3:1' WHERE payout_id='W43:2'$$);
+SELECT expect_fail('payroll: PAID without a receipt', $$UPDATE payouts SET status='PAID' WHERE payout_id='W43:2'$$);
+SELECT expect_ok('payroll: PAID with a receipt', $$UPDATE payouts SET status='PAID', receipt='UJKB2C0001' WHERE payout_id='W43:2'$$);
+SELECT expect_fail('payroll: one receipt for two people', $$UPDATE payouts SET status='PAID', receipt='UJKB2C0001' WHERE payout_id='W43:3'$$);
+SELECT expect_fail('payroll: an unknown line status', $$UPDATE payouts SET status='MAYBE' WHERE payout_id='W43:3'$$);

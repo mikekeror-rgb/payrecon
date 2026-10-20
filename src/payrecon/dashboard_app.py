@@ -171,6 +171,8 @@ def main() -> None:
             db = sb.text_input("Books and ledger", "app.db")
             store = sb.text_input("Action store", "actions.db")
     d = _dashboard(demo, db, store)
+    view = sb.radio("View", ["Payments in", "Payroll"], horizontal=True,
+                    help="Payments in: customers paying you. Payroll: you paying people.")
     use_ai = sb.toggle("Use AI", value=demo,
                        help="Demo: replays Claude's real answers on these payments (20 Oct 2026). Your data: calls Claude.")
     llm = _model(use_ai, demo)
@@ -191,6 +193,9 @@ def main() -> None:
             st.session_state.pop("msg", None)
             st.session_state.pop("snap", None)
     sb.caption("No sign-in: use your own machine for real data.")
+    if view == "Payroll":
+        payroll_page(d, user, demo)
+        return
 
     # The demo starts with its fixes already planned, so there is something to decide straight away.
     if demo and st.session_state.pop("fresh_demo", False):
@@ -303,6 +308,148 @@ def main() -> None:
         if snap["actions"]:
             st.dataframe(snap["actions"], hide_index=True)
         st.dataframe(snap["audit"], hide_index=True)
+
+
+def _week() -> str:
+    from datetime import date
+
+    y, w, _ = date.today().isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+PAY_LABEL = {"PAID": ("Paid", "green"), "FAILED": ("Failed: nothing was paid", "red"), "UNKNOWN": ("Unknown: check before doing anything", "amber"),
+             "ACCEPTED": ("Sent, waiting for M-Pesa", "blue"), "QUEUED": ("Ready to send", "grey"), "WAITING": ("Waiting for approval", "grey"),
+             "SENDING": ("Sending", "blue"), "CANCELLED": ("Cancelled", "grey")}
+
+
+def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
+    from payrecon.dashboard import EXAMPLES
+    from payrecon.payroll import PayrollError
+
+    p = d.payroll()
+    sub = ("Demo · simulated M-Pesa: numbers ending 0000 fail, 1111 time out · no real money moves" if demo
+           else ("Your data · M-Pesa connected" if p.port else "Your data · no M-Pesa credentials: you can import and approve, not send"))
+    st.markdown(f'<div class="pr-hero"><h1>Payroll</h1><p>Pay everyone in one approved batch instead of one by one. '
+                f'Nobody is paid twice, and every payment ends paid, failed or flagged for you to check.</p>'
+                f'<span class="pr-pill">{_e(sub)}</span></div>', unsafe_allow_html=True)
+    if "msg" in st.session_state:
+        kind, msg = st.session_state.pop("msg")
+        (st.success if kind == "ok" else st.warning if kind == "warn" else st.info)(msg)
+
+    batches = p.batches()
+    names = [b["batch"] for b in batches]
+
+    # ---- step 1: the list ------------------------------------------------------------------------------
+    st.markdown('<div class="pr-step">Step 1 · The list</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 1])
+    name = c2.text_input("Batch name", (f"DEMO-{_week()}" if demo else _week()) + ("" if not names else f"-{len(names) + 1}"))
+    up = c1.file_uploader("Spreadsheet saved as CSV: name, phone, amount", type=["csv"])
+    text = up.getvalue().decode("utf-8", errors="replace") if up is not None else None
+    b1, b2, _ = st.columns([1, 1, 3])
+    use_demo = demo and b2.button("Use the demo list")
+    if use_demo:
+        text = (EXAMPLES / "payroll_demo.csv").read_text()
+    if text is not None and (b1.button("Check and import", type="primary") or use_demo):
+        try:
+            c = p.create_batch(name, text, user or "unknown")
+        except PayrollError as e:
+            _say(str(e), "warn")
+        else:
+            if c.errors:
+                _say("Nothing imported. Fix these in the file and try again: " + " · ".join(c.errors[:8]), "warn")
+            else:
+                st.session_state["pay_batch"] = name
+                _say(f"Imported {len(c.lines)} people, total {_money(float(c.total))}. Check the list, then approve it.", "ok")
+        st.rerun()
+    if not names:
+        st.caption("Upload this week's list" + (", or use the demo list." if demo else "."))
+        return
+
+    current = st.session_state.get("pay_batch") if st.session_state.get("pay_batch") in names else names[0]
+    batch = st.selectbox("Batch", names, index=names.index(current))
+    st.session_state["pay_batch"] = batch
+    info = [b for b in batches if b["batch"] == batch][0]
+    rep = p.report(batch)
+    k = rep["counts"]
+    st.markdown(
+        '<div class="pr-stats">'
+        f'<div class="pr-stat"><div class="n">{info["lines"]}</div><div class="l">people · {_money(float(rep["total"]))}</div></div>'
+        f'<div class="pr-stat"><div class="n">{k.get("PAID", 0)}</div><div class="l">paid · {_money(float(rep["paid_total"]))}</div></div>'
+        f'<div class="pr-stat"><div class="n">{k.get("FAILED", 0)}</div><div class="l">failed</div></div>'
+        f'<div class="pr-stat"><div class="n">{k.get("UNKNOWN", 0)}</div><div class="l">to check</div></div>'
+        '</div>', unsafe_allow_html=True)
+
+    # ---- step 2: approve ---------------------------------------------------------------------------------
+    st.markdown('<div class="pr-step">Step 2 · Approve once</div>', unsafe_allow_html=True)
+    if info["status"] == "DRAFT":
+        st.write(f"**Pay {info['lines']} people a total of {_money(float(rep['total']))}?** Check the list below first.")
+        if st.button("Approve batch", type="primary"):
+            try:
+                p.approve(batch, user, d.approvers)
+                _say(f"Approved by {user}. Now send it.", "ok")
+            except PayrollError as e:
+                _say(str(e), "warn")
+            st.rerun()
+    else:
+        st.caption(f"{info['status'].capitalize()}" + (f" by {info['approved_by']}" if info["approved_by"] else "") + ".")
+
+    # ---- step 3: send ------------------------------------------------------------------------------------
+    st.markdown('<div class="pr-step">Step 3 · Send</div>', unsafe_allow_html=True)
+    queued = k.get("QUEUED", 0)
+    if info["status"] == "APPROVED" and queued:
+        st.write(f"{queued} payment(s) ready to send.")
+        sure = True if demo else st.checkbox("I understand this sends real money")
+        if st.button("Send payments", type="primary", disabled=not (sure and p.port)):
+            try:
+                r = d.payroll_send(batch)
+                _say(f"{r['accepted']} sent and accepted by M-Pesa, {r['unknown']} unknown (never resent: check them), "
+                     f"{r['not_sent']} not sent (still ready)." + (" Results are in." if r.get("results") else
+                                                                  " Results arrive through the receiver; refresh to see them."), "ok")
+            except PayrollError as e:
+                _say(str(e), "warn")
+            st.rerun()
+    elif info["status"] == "APPROVED":
+        st.caption("Everything in this batch has been sent.")
+    else:
+        st.caption("Approve the batch first.")
+
+    # ---- what needs you ------------------------------------------------------------------------------------
+    attention = rep["attention"]
+    if attention:
+        st.markdown('<div class="pr-step">Needs you</div>', unsafe_allow_html=True)
+        for r in attention:
+            label, color = PAY_LABEL[r["status"]]
+            why = r["result"] or r["detail"] or ""
+            st.markdown(_card(color, label, r["name"], _money(float(r["amount"])), f"{r['phone']} · {why}"), unsafe_allow_html=True)
+            if r["status"] == "UNKNOWN":
+                rc1, rc2, rc3 = st.columns([2, 1, 1])
+                receipt = rc1.text_input("Receipt from the M-Pesa statement", key=f"rc{r['payout_id']}", placeholder="e.g. UJK...")
+                if rc2.button("It was paid", key=f"yes{r['payout_id']}"):
+                    try:
+                        p.resolve(r["payout_id"], user, d.approvers, paid=True, receipt=receipt)
+                        _say(f"{r['name']} marked paid.", "ok")
+                    except PayrollError as e:
+                        _say(str(e), "warn")
+                    st.rerun()
+                if rc3.button("It was not paid", key=f"no{r['payout_id']}"):
+                    try:
+                        p.resolve(r["payout_id"], user, d.approvers, paid=False)
+                        _say(f"{r['name']} marked not paid; you can send it again.", "ok")
+                    except PayrollError as e:
+                        _say(str(e), "warn")
+                    st.rerun()
+        if k.get("FAILED") and st.button(f"Send the {k['FAILED']} failed payment(s) again"):
+            try:
+                n = p.requeue_failed(batch, user, d.approvers)
+                _say(f"{n} payment(s) ready to send again (as a new attempt).", "ok")
+            except PayrollError as e:
+                _say(str(e), "warn")
+            st.rerun()
+
+    with st.expander(f"Everyone in {batch} ({info['lines']})", expanded=info["status"] == "DRAFT"):
+        st.dataframe([{"Line": r["line"], "Name": r["name"], "Phone": r["phone"], "Amount": float(r["amount"]),
+                       "Status": PAY_LABEL.get(r["status"], (r["status"],))[0], "Receipt": r["receipt"] or "",
+                       "Note": r["result"] or r["detail"] or ""} for r in p.lines(batch)], hide_index=True)
 
 
 if __name__ == "__main__":

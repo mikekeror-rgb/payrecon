@@ -78,6 +78,10 @@ def build_gateway(db: Database, ledger: SqlLedger) -> DarajaGateway | OfflineGat
         timeout_url=env.get("DARAJA_TIMEOUT_URL") or sibling_url(env["DARAJA_CALLBACK_URL"], "reversal-timeout"),
         security_credential=(env.get("DARAJA_SECURITY_CREDENTIAL") or "").strip().strip('"') or None,
         reversal_shortcode=env.get("DARAJA_REVERSAL_SHORTCODE") or env.get("DARAJA_C2B_SHORTCODE") or None,
+        b2c_shortcode=env.get("DARAJA_B2C_SHORTCODE") or env.get("DARAJA_C2B_SHORTCODE") or None,
+        b2c_command=env.get("DARAJA_B2C_COMMAND") or "BusinessPayment",
+        b2c_result_url=env.get("DARAJA_B2C_RESULT_URL") or sibling_url(env["DARAJA_CALLBACK_URL"], "b2c-result"),
+        b2c_timeout_url=env.get("DARAJA_B2C_TIMEOUT_URL") or sibling_url(env["DARAJA_CALLBACK_URL"], "b2c-timeout"),
     )
 
 
@@ -176,6 +180,84 @@ def cmd_plan(args) -> int:
     print(f"proposed {len(pr.proposed)} ({_fmt(Counter(a.action_type.value for a in pr.proposed))}); "
           f"{sum(a.requires_approval for a in pr.proposed)} need approval; already known {pr.existing}; "
           f"review items opened {pr.new_escalations}; skipped {len(pr.skipped)}")
+    return 0
+
+
+# ---- payroll (B2C) -----------------------------------------------------------------------------------------
+
+def _payroll(args):
+    from .payroll import PayrollService
+
+    db = open_db(args.db)
+    gw = build_gateway(db, SqlLedger(db))
+    if isinstance(gw, OfflineGateway):
+        base = os.environ.get("DARAJA_BASE_URL", SANDBOX_URL)
+        return PayrollService(db, None, PiiBox(os.environ.get("PAYRECON_PII_KEY"), allow_plaintext=_is_sandbox(base))), None
+    return PayrollService(db, gw, gw.pii), gw
+
+
+def _show_lines(svc, batch: str, only: tuple[str, ...] = ()) -> None:
+    for r in svc.lines(batch):
+        if only and r["status"] not in only:
+            continue
+        extra = r["receipt"] or r["result"] or r["detail"] or ""
+        print(f"  {r['line']:>4}  {r['name'][:24]:<24} {r['phone']:<12} {float(r['amount']):>10,.0f}  {r['status']:<9} {str(extra)[:70]}")
+
+
+def cmd_payroll(args) -> int:
+    from .payroll import PayrollError
+
+    svc, gw = _payroll(args)
+    roles = _roles()
+    try:
+        if args.action == "import":
+            text = Path(args.file).read_text(encoding="utf-8")
+            c = svc.create_batch(args.batch, text, args.as_user)
+            if c.errors:
+                print(f"nothing imported: {len(c.errors)} problem(s) to fix in {args.file}")
+                for e in c.errors:
+                    print("  -", e)
+                return 1
+            print(f"batch {args.batch}: {len(c.lines)} people, total KSh {c.total:,.0f}. Check it, then: payroll approve --batch {args.batch} --as <approver>")
+            _show_lines(svc, args.batch)
+        elif args.action == "show":
+            for b in svc.batches() if not args.batch else [x for x in svc.batches() if x["batch"] == args.batch]:
+                print(f"{b['batch']}: {b['status']}, {b['lines']} people, KSh {float(b['total']):,.0f}, made by {b['created_by']}"
+                      + (f", approved by {b['approved_by']}" if b["approved_by"] else ""))
+            if args.batch:
+                _show_lines(svc, args.batch)
+        elif args.action == "approve":
+            svc.approve(args.batch, args.as_user, roles, args.note or "")
+            print(f"approved {args.batch} as {args.as_user}. Send it with: payroll send --batch {args.batch} --execute")
+        elif args.action == "send":
+            if args.execute and gw is None:
+                print("no Daraja credentials in the environment: nothing can be sent (dry run only)")
+                return 2
+            r = svc.send(args.batch, execute=args.execute)
+            if not args.execute:
+                print(f"dry run: {r['would_send']} payment(s) would be sent, total KSh {r['total']:,.0f}. Nothing was sent; add --execute.")
+            else:
+                print(f"sent: {r['accepted']} accepted by M-Pesa, {r['unknown']} unknown (never resent; check them), "
+                      f"{r['not_sent']} not sent (still queued)" + (f"; {r['notes'][0]}" if r["notes"] else ""))
+                print("results arrive on the receiver (serve); then: payroll report --batch " + args.batch)
+        elif args.action == "report":
+            rep = svc.report(args.batch)
+            print(f"{args.batch}: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["counts"].items()))
+                  + f"; paid KSh {rep['paid_total']:,.0f} of KSh {rep['total']:,.0f}")
+            if rep["attention"]:
+                print("needs attention:")
+                _show_lines(svc, args.batch, ("FAILED", "UNKNOWN"))
+        elif args.action == "resolve":
+            pid = f"{args.batch}:{args.line}"
+            svc.resolve(pid, args.as_user, roles, paid=args.paid, receipt=args.receipt or "", note=args.note or "")
+            print(f"line {args.line} of {args.batch} marked {'PAID' if args.paid else 'not paid (FAILED)'} by {args.as_user}")
+        elif args.action == "requeue":
+            print(f"{svc.requeue_failed(args.batch, args.as_user, roles)} failed line(s) queued again; send with: payroll send --batch {args.batch} --execute")
+        elif args.action == "cancel":
+            print(f"{svc.cancel(args.batch, args.as_user, roles)} unsent line(s) cancelled; anything already sent is unchanged")
+    except PayrollError as e:
+        print("refused:", e)
+        return 1
     return 0
 
 

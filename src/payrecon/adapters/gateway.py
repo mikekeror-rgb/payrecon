@@ -91,6 +91,10 @@ class DarajaGateway:
         timeout_url: str | None = None,
         security_credential: str | None = None,
         reversal_shortcode: str | None = None,
+        b2c_shortcode: str | None = None,
+        b2c_command: str = "BusinessPayment",
+        b2c_result_url: str | None = None,
+        b2c_timeout_url: str | None = None,
         connect_timeout: float = 5.0,
         read_timeout: float = 20.0,
     ):
@@ -101,6 +105,8 @@ class DarajaGateway:
         # The shortcode that received the payments being reversed. Reversals are documented for C2B, whose paybill is not
         # the STK shortcode: sending 174379 for a 600978 payment got 2001 "The initiator information is invalid" live.
         self.reversal_shortcode = reversal_shortcode
+        self.b2c_shortcode, self.b2c_command = b2c_shortcode, b2c_command
+        self.b2c_result_url, self.b2c_timeout_url = b2c_result_url, b2c_timeout_url
         self.security_credential = security_credential  # ready-made (e.g. from the portal); else built from password + certificate
         self.timeouts = (connect_timeout, read_timeout)
         provider.stk_requests = SqlStkRequests(db)  # so callbacks can recover reference and amount
@@ -264,6 +270,45 @@ class DarajaGateway:
             raise NotSentError("C2B simulate exists only on the sandbox")
         return self._post("/mpesa/c2b/v1/simulate", {"ShortCode": shortcode or self.provider.shortcode, "CommandID": "CustomerPayBillOnline",
                                                       "Amount": self._whole_shillings(amount), "Msisdn": msisdn, "BillRefNumber": bill_ref})
+
+    # ---- B2C (paying people: payroll) -------------------------------------------------------------------
+
+    def _credential(self) -> str:
+        if self.security_credential:
+            return self.security_credential
+        if not (self.initiator_password and self.cert_pem):
+            raise NotSentError("no security credential: set DARAJA_SECURITY_CREDENTIAL, or the initiator password and certificate")
+        try:
+            return security_credential(self.initiator_password, self.cert_pem)
+        except Exception as e:  # bad certificate: nothing was sent
+            raise NotSentError(f"could not build the SecurityCredential: {type(e).__name__}") from None
+
+    def send_b2c(self, *, originator_id: str, phone: str, amount: Decimal, remarks: str) -> tuple[str, str]:
+        """Ask Daraja to pay a person (B2C). Implements payroll.PayoutPort. 'Accepted' is all this can mean: the outcome
+        arrives later on the result URL. Shapes are from Daraja's documentation (B2C v3); not yet seen live, because the
+        sandbox's shared initiator credential was locked (8006) when this was built."""
+        for name in ("initiator", "b2c_result_url", "b2c_timeout_url"):
+            if not getattr(self, name):
+                raise NotSentError(f"B2C is not configured ({name} missing)")
+        whole = self._whole_shillings(amount)
+        body = {
+            "OriginatorConversationID": originator_id,
+            "InitiatorName": self.initiator,
+            "SecurityCredential": self._credential(),
+            "CommandID": self.b2c_command,
+            "Amount": whole,
+            "PartyA": self.b2c_shortcode or self.provider.shortcode,
+            "PartyB": normalize_msisdn(phone),
+            "Remarks": (remarks or "Payment")[:100],
+            "QueueTimeOutURL": self.b2c_timeout_url,
+            "ResultURL": self.b2c_result_url,
+            "Occassion": "",  # sic: Daraja's documented spelling
+        }
+        resp = self._post("/mpesa/b2c/v3/paymentrequest", body)
+        conv = resp.get("ConversationID")
+        if not conv:
+            raise SendOutcomeUnknown(f"Daraja accepted the payment but returned no ConversationID: {self._safe(resp)}")
+        return str(conv), str(resp.get("OriginatorConversationID") or originator_id)
 
     def _refund_update(self, key: str, status: str, **cols: Any) -> None:
         sets = ["status = ?", "updated_at = ?"] + [f"{c} = ?" for c in cols]

@@ -20,7 +20,8 @@ RK1,1500,SUCCESS,2026-10-18T09:00:00,INV-0001,254708374149,0,,
 """
 DARAJA_VARS = ("DARAJA_CONSUMER_KEY", "DARAJA_CONSUMER_SECRET", "DARAJA_SHORTCODE", "DARAJA_PASSKEY", "DARAJA_CALLBACK_URL", "DARAJA_BASE_URL",
                "PAYRECON_APPROVERS", "PAYRECON_PII_KEY", "PAYRECON_WEBHOOK_TOKEN", "PAYRECON_VERIFY_SUCCESS", "PAYRECON_WEBHOOK_ALLOW_IPS",
-               "DARAJA_INITIATOR", "DARAJA_INITIATOR_PASSWORD", "DARAJA_CERT_PATH", "DARAJA_RESULT_URL", "DARAJA_TIMEOUT_URL", "DARAJA_C2B_SHORTCODE", "DARAJA_SECURITY_CREDENTIAL", "DARAJA_REVERSAL_SHORTCODE")
+               "DARAJA_INITIATOR", "DARAJA_INITIATOR_PASSWORD", "DARAJA_CERT_PATH", "DARAJA_RESULT_URL", "DARAJA_TIMEOUT_URL", "DARAJA_C2B_SHORTCODE", "DARAJA_SECURITY_CREDENTIAL", "DARAJA_REVERSAL_SHORTCODE",
+               "DARAJA_B2C_SHORTCODE", "DARAJA_B2C_COMMAND", "DARAJA_B2C_RESULT_URL", "DARAJA_B2C_TIMEOUT_URL")
 
 
 @contextlib.contextmanager
@@ -462,3 +463,54 @@ def test_an_auto_apply_planned_before_a_reversal_is_cancelled_when_it_runs_after
         assert "REVERSED_PAYMENT" in flat and "RK1" in flat and "outside payrecon" in flat
     db = L.open_db(dbfile)
     assert L.SqlBooks(db).get_invoice("I1").internal_status is InternalStatus.UNPAID
+
+
+def test_payroll_from_the_command_line_imports_approves_sends_and_settles_from_the_results(tmp_path):
+    import json
+    from payrecon.webhook import WebhookService
+
+    (tmp_path / "pay.csv").write_text("name,phone,amount\nGrace Wanjiku,0712345678,1500\nPeter Otieno,0722000111,1200\n")
+    (tmp_path / "bad.csv").write_text("name,phone,amount\nJane,0812345678,1500\nJoe,0712345678,1.5\n")
+    dbfile = str(tmp_path / "app.db")
+    with FakeDaraja() as fd:
+        with env(**_live_env(fd, DARAJA_INITIATOR="testapi", DARAJA_SECURITY_CREDENTIAL="cred", DARAJA_C2B_SHORTCODE="600978",
+                             PAYRECON_APPROVERS="mike")):
+            code, out = run("payroll", "import", "--db", dbfile, "--batch", "W43", "--file", str(tmp_path / "bad.csv"), "--as", "mike")
+            assert code == 1 and "nothing imported: 2 problem(s)" in out
+            code, out = run("payroll", "import", "--db", dbfile, "--batch", "W43", "--file", str(tmp_path / "pay.csv"), "--as", "mike")
+            assert code == 0 and "2 people, total KSh 2,700" in out and "0712345678" not in out
+            code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
+            assert code == 1 and "approve it first" in out and fd.calls_to("/mpesa/b2c/v3/paymentrequest") == []
+            assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "ai-assistant")[0] == 1
+            assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike")[0] == 0
+            code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43")
+            assert "dry run: 2 payment(s)" in out and fd.calls_to("/mpesa/b2c/v3/paymentrequest") == []
+            code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
+            assert code == 0 and "sent: 2 accepted" in out
+            run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")  # again: nothing new goes
+            calls = fd.calls_to("/mpesa/b2c/v3/paymentrequest")
+            assert len(calls) == 2 and calls[0]["json"]["ResultURL"] == f"https://tunnel.example.com/daraja/b2c-result/{TOK}"
+            assert calls[0]["json"]["PartyA"] == "600978" and calls[0]["json"]["SecurityCredential"] == "cred"
+            db = livecli.open_db(dbfile)
+            svc = WebhookService(livecli.build_gateway(db, livecli.SqlLedger(db)), db, TOK)
+            ok, failed = fd.b2c_result(calls[0]["json"], receipt="UJKB2C0001"), fd.b2c_result(calls[1]["json"], ok=False)
+            for r in (ok, failed):
+                assert svc.handle("POST", f"/daraja/b2c-result/{TOK}", json.dumps(r).encode())[0] == 200
+            code, out = run("payroll", "report", "--db", dbfile, "--batch", "W43")
+            assert "FAILED 1, PAID 1; paid KSh 1,500 of KSh 2,700" in out and "needs attention" in out
+            assert "2547****111" in out and "0722000111" not in out
+            code, out = run("payroll", "requeue", "--db", dbfile, "--batch", "W43", "--as", "mike")
+            assert "1 failed line(s) queued again" in out
+            run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
+            calls = fd.calls_to("/mpesa/b2c/v3/paymentrequest")
+            assert len(calls) == 3 and calls[2]["json"]["OriginatorConversationID"].endswith(":2")
+
+
+def test_payroll_cannot_send_without_credentials(tmp_path):
+    (tmp_path / "pay.csv").write_text("name,phone,amount\nGrace,0712345678,1500\n")
+    dbfile = str(tmp_path / "app.db")
+    with env(PAYRECON_APPROVERS="mike"):
+        assert run("payroll", "import", "--db", dbfile, "--batch", "W43", "--file", str(tmp_path / "pay.csv"), "--as", "mike")[0] == 0
+        assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike")[0] == 0
+        code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
+        assert code == 2 and "nothing can be sent" in out

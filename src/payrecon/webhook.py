@@ -35,13 +35,14 @@ from .adapters.gateway import DarajaGateway
 from .models import TxnStatus
 from .providers.base import ProviderError, RateLimited, mask_msisdn
 
-KINDS = ("stk", "c2b", "reversal-result", "reversal-timeout")
+KINDS = ("stk", "c2b", "reversal-result", "reversal-timeout", "b2c-result", "b2c-timeout")
 MAX_BODY = 64 * 1024
 MAX_ATTEMPTS = 10  # an item that still fails after this many tries is quarantined for a person
 MIN_TOKEN = 24
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _PHONE_KEYS = {"MSISDN", "PhoneNumber", "msisdn"}
 _NAME_KEYS = {"FirstName", "MiddleName", "LastName"}
+_PAYEE_KEYS = {"ReceiverPartyPublicName"}
 ACK = {"ResultCode": 0, "ResultDesc": "Accepted"}
 VALIDATION = "c2b-validation"
 VALIDATION_ACCEPT = {"ResultCode": "0", "ResultDesc": "Accepted"}
@@ -66,6 +67,8 @@ def sanitize(obj: Any) -> Any:
                 out[k] = "<removed>"
             elif k == "Value" and obj.get("Name") in _PHONE_KEYS:  # STK success: {"Name": "PhoneNumber", "Value": 2547...}
                 out[k] = mask_msisdn(v)
+            elif k == "Value" and obj.get("Key") in _PAYEE_KEYS:  # B2C result: {"Key": "ReceiverPartyPublicName", "Value": "2547... - Name"}
+                out[k] = "<removed>"
             else:
                 out[k] = sanitize(v)
         return out
@@ -170,7 +173,21 @@ class WebhookService:
             with self._busy_lock:
                 self._busy.discard(key)
 
+    def _payroll(self):
+        from .payroll import PayrollService
+
+        return PayrollService(self.db, None, self.gw.pii, now=self.now)
+
     def _apply(self, kind: str, payload: Mapping[str, Any]) -> Outcome:
+        if kind == "b2c-result":
+            try:
+                status = self._payroll().ingest_result(payload)
+            except ValueError as e:
+                return Outcome("QUARANTINED", str(e))
+            return Outcome("INGESTED", f"payout {status}") if status else Outcome("QUARANTINED", "matches no payout")
+        if kind == "b2c-timeout":
+            status = self._payroll().note_timeout(payload)
+            return Outcome("NOTED", f"M-Pesa reported a payout timeout; the line is {status}" if status else "payout timeout for no known payout")
         if kind == "reversal-timeout":
             return Outcome("NOTED", "Daraja timed out on a reversal; it stays ACCEPTED and a person must check whether it happened")
         if kind == "reversal-result":

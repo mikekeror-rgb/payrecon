@@ -174,7 +174,7 @@ CREATE TABLE notification_outbox (
 -- payload is the key, so a redelivery is recognised. QUARANTINED = a person looks; ERROR = will be retried.
 CREATE TABLE webhook_inbox (
     payload_sha256 TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL CHECK (kind IN ('stk', 'c2b', 'reversal-result', 'reversal-timeout')),
+    kind           TEXT NOT NULL CHECK (kind IN ('stk', 'c2b', 'reversal-result', 'reversal-timeout', 'b2c-result', 'b2c-timeout')),
     received_at    TIMESTAMPTZ NOT NULL,
     payload        TEXT NOT NULL,
     status         TEXT NOT NULL CHECK (status IN ('RECEIVED', 'INGESTED', 'QUARANTINED', 'ERROR', 'NOTED')),
@@ -183,3 +183,39 @@ CREATE TABLE webhook_inbox (
     processed_at   TIMESTAMPTZ
 );
 CREATE INDEX webhook_inbox_status ON webhook_inbox (status);
+
+-- Payroll (B2C payouts). One line per person per batch; nothing is sent until a person approves the batch.
+CREATE TABLE payout_batches (
+    batch_id    TEXT PRIMARY KEY,
+    status      TEXT NOT NULL CHECK (status IN ('DRAFT', 'APPROVED', 'CANCELLED')),
+    total       NUMERIC(14,2) NOT NULL CHECK (total > 0),
+    lines       INTEGER NOT NULL CHECK (lines > 0),
+    created_by  TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL,
+    approved_by TEXT,
+    approved_at TIMESTAMPTZ,
+    note        TEXT,
+    CHECK (status <> 'APPROVED' OR (approved_by IS NOT NULL AND approved_at IS NOT NULL))
+);
+CREATE TABLE payouts (
+    payout_id                  TEXT PRIMARY KEY,
+    batch_id                   TEXT NOT NULL REFERENCES payout_batches (batch_id),
+    line_no                    INTEGER NOT NULL,
+    name                       TEXT NOT NULL,
+    payee_key                  TEXT NOT NULL,
+    msisdn_enc                 TEXT NOT NULL,
+    msisdn_masked              TEXT NOT NULL,
+    amount                     NUMERIC(14,2) NOT NULL CHECK (amount > 0 AND amount = trunc(amount)),
+    status                     TEXT NOT NULL CHECK (status IN ('WAITING', 'QUEUED', 'SENDING', 'ACCEPTED', 'PAID', 'FAILED', 'UNKNOWN', 'CANCELLED')),
+    attempt                    INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+    conversation_id            TEXT UNIQUE,
+    originator_conversation_id TEXT UNIQUE,
+    receipt                    TEXT UNIQUE,
+    result_code                TEXT,
+    result_desc                TEXT,
+    detail                     TEXT,
+    created_at                 TIMESTAMPTZ NOT NULL,
+    updated_at                 TIMESTAMPTZ NOT NULL,
+    UNIQUE (batch_id, payee_key),
+    CHECK (status <> 'PAID' OR receipt IS NOT NULL)
+);

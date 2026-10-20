@@ -24,6 +24,7 @@ class FakeDaraja:
         self.faults: dict[str, dict[str, Any]] = {}  # path -> {"mode": status|drop|hang, ...}, applied to the next `count` calls
         self.token_ttl = 3599
         self.c2b_urls: dict[str, Any] = {}  # the last registerurl body
+        self.b2c_payments: list[dict[str, Any]] = []  # every accepted B2C request: what "M-Pesa" was asked to pay
         self._n = 0
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -134,6 +135,8 @@ class FakeDaraja:
             self._c2b_register(h, body)
         elif path == "/mpesa/c2b/v1/simulate":
             self._c2b_simulate(h, body)
+        elif path == "/mpesa/b2c/v3/paymentrequest":
+            self._b2c(h, body)
         else:
             h._send(404, {"errorCode": "404.001.03", "errorMessage": "Not Found"})  # type: ignore[attr-defined]
 
@@ -219,6 +222,34 @@ class FakeDaraja:
             return
         h._send(200, {"OriginatorCoversationID": f"sim-{self._next_id()}", "ResponseCode": "0",  # type: ignore[attr-defined]
                       "ResponseDescription": "Accept the service request successfully."})
+
+
+    def _b2c(self, h: BaseHTTPRequestHandler, b: dict[str, Any]) -> None:
+        if not self._authorised(h):
+            h._send(401, {"errorCode": "404.001.03", "errorMessage": "Invalid Access Token"})  # type: ignore[attr-defined]
+            return
+        need = ("OriginatorConversationID", "InitiatorName", "SecurityCredential", "CommandID", "Amount", "PartyA", "PartyB",
+                "Remarks", "QueueTimeOutURL", "ResultURL")
+        missing = [k for k in need if k not in b]
+        if missing or b.get("CommandID") not in ("BusinessPayment", "SalaryPayment", "PromotionPayment"):
+            h._send(400, {"errorCode": "400.002.02", "errorMessage": f"Bad Request - Invalid {(missing or ['CommandID'])[0]}"})  # type: ignore[attr-defined]
+            return
+        n = self._next_id()
+        self.b2c_payments.append(dict(b))
+        h._send(200, {"ConversationID": f"AG_B2C_{n:012d}", "OriginatorConversationID": b["OriginatorConversationID"],  # type: ignore[attr-defined]
+                      "ResponseCode": "0", "ResponseDescription": "Accept the service request successfully."})
+
+    def b2c_result(self, body: dict[str, Any], *, ok: bool = True, receipt: str = "UJKB2C0001", code: int = 2040) -> dict[str, Any]:
+        """The result Daraja would post later for an accepted B2C request (shape from the docs)."""
+        return {"Result": {
+            "ResultType": 0, "ResultCode": 0 if ok else code,
+            "ResultDesc": "The service request is processed successfully." if ok else "The receiver is not registered",
+            "OriginatorConversationID": body["OriginatorConversationID"], "ConversationID": body.get("_conversation", ""),
+            "TransactionID": receipt if ok else "",
+            "ResultParameters": {"ResultParameter": [
+                {"Key": "TransactionAmount", "Value": body["Amount"]}, {"Key": "TransactionReceipt", "Value": receipt},
+                {"Key": "ReceiverPartyPublicName", "Value": f"{body['PartyB']} - Jane Worker"},
+                {"Key": "TransactionCompletedDateTime", "Value": "20.10.2026 22:30:00"}]} if ok else {}}}
 
 
 _CERT: dict[str, Any] = {}

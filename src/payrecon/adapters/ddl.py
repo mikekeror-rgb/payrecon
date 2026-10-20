@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 -- QUARANTINED (contradicts our records or unusable: a person looks), ERROR (retry), NOTED (informational).
 CREATE TABLE IF NOT EXISTS webhook_inbox (
     payload_sha256 TEXT PRIMARY KEY,
-    kind           TEXT NOT NULL CHECK (kind IN ('stk', 'c2b', 'reversal-result', 'reversal-timeout')),
+    kind           TEXT NOT NULL CHECK (kind IN ('stk', 'c2b', 'reversal-result', 'reversal-timeout', 'b2c-result', 'b2c-timeout')),
     received_at    TEXT NOT NULL,
     payload        TEXT NOT NULL,
     status         TEXT NOT NULL CHECK (status IN ('RECEIVED', 'INGESTED', 'QUARANTINED', 'ERROR', 'NOTED')),
@@ -98,7 +98,63 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
     processed_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS webhook_inbox_status ON webhook_inbox (status);
+
+-- Payroll: a batch of payouts (B2C) that a person approves once. A line is one person in one batch: UNIQUE stops the
+-- same number appearing twice in a batch. Status: WAITING (batch not approved), QUEUED (approved, not sent), SENDING
+-- (claimed, the request may be on its way: write-ahead), ACCEPTED (M-Pesa took it, result pending), PAID, FAILED
+-- (M-Pesa said no: nothing moved), UNKNOWN (it may have been sent: never resent automatically), CANCELLED.
+CREATE TABLE IF NOT EXISTS payout_batches (
+    batch_id    TEXT PRIMARY KEY,
+    status      TEXT NOT NULL CHECK (status IN ('DRAFT', 'APPROVED', 'CANCELLED')),
+    total       TEXT NOT NULL,
+    lines       INTEGER NOT NULL,
+    created_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    approved_by TEXT,
+    approved_at TEXT,
+    note        TEXT
+);
+CREATE TABLE IF NOT EXISTS payouts (
+    payout_id                  TEXT PRIMARY KEY,
+    batch_id                   TEXT NOT NULL REFERENCES payout_batches (batch_id),
+    line_no                    INTEGER NOT NULL,
+    name                       TEXT NOT NULL,
+    payee_key                  TEXT NOT NULL,
+    msisdn_enc                 TEXT NOT NULL,
+    msisdn_masked              TEXT NOT NULL,
+    amount                     TEXT NOT NULL,
+    status                     TEXT NOT NULL CHECK (status IN ('WAITING', 'QUEUED', 'SENDING', 'ACCEPTED', 'PAID', 'FAILED', 'UNKNOWN', 'CANCELLED')),
+    attempt                    INTEGER NOT NULL DEFAULT 1,
+    conversation_id            TEXT,
+    originator_conversation_id TEXT,
+    receipt                    TEXT,
+    result_code                TEXT,
+    result_desc                TEXT,
+    detail                     TEXT,
+    created_at                 TEXT NOT NULL,
+    updated_at                 TEXT NOT NULL,
+    UNIQUE (batch_id, payee_key)
+);
+CREATE INDEX IF NOT EXISTS payouts_conversation ON payouts (conversation_id);
+CREATE INDEX IF NOT EXISTS payouts_originator ON payouts (originator_conversation_id);
 """
+
+
+def _rebuild(db, table: str) -> None:
+    start = SQLITE_DDL.index(f"CREATE TABLE IF NOT EXISTS {table} (")
+    create = SQLITE_DDL[start:SQLITE_DDL.index(");", start) + 2].replace(f"IF NOT EXISTS {table}", table)
+    with db.tx():
+        db.execute(f"ALTER TABLE {table} RENAME TO {table}_old")
+        db.execute(create)
+        db.execute(f"INSERT INTO {table} SELECT * FROM {table}_old")
+        db.execute(f"DROP TABLE {table}_old")
+
+
+# (table, text the current definition contains, what the upgrade allows)
+_UPGRADES = (
+    ("provider_transactions", "'REVERSED'", "status may now be REVERSED"),
+    ("webhook_inbox", "'b2c-result'", "payout (B2C) results may now be received"),
+)
 
 
 def migrate_sqlite(db) -> list[str]:
@@ -106,15 +162,11 @@ def migrate_sqlite(db) -> list[str]:
     constraint is out of date is rebuilt under the current definition, rows copied, in one transaction.
     Returns what was migrated (empty when already current)."""
     done: list[str] = []
-    row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_transactions'").fetchone()
-    if row and "'REVERSED'" not in row[0]:
-        start = SQLITE_DDL.index("CREATE TABLE IF NOT EXISTS provider_transactions")
-        create = SQLITE_DDL[start:SQLITE_DDL.index(");", start) + 2].replace("IF NOT EXISTS provider_transactions", "provider_transactions")
-        with db.tx():
-            db.execute("ALTER TABLE provider_transactions RENAME TO provider_transactions_old")
-            db.execute(create)
-            db.execute("INSERT INTO provider_transactions SELECT * FROM provider_transactions_old")
-            db.execute("DROP TABLE provider_transactions_old")
-        db.script(SQLITE_DDL)  # indexes
-        done.append("provider_transactions: status may now be REVERSED")
+    for table, marker, what in _UPGRADES:
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+        if row and marker not in row[0]:
+            _rebuild(db, table)
+            done.append(f"{table}: {what}")
+    if done:
+        db.script(SQLITE_DDL)  # indexes and any new tables
     return done

@@ -11,6 +11,8 @@ A business that takes M-Pesa payments has to answer, every day: which invoices a
 
 ![The dashboard on the demo data](docs/dashboard.png)
 
+**New in v0.10: payroll.** Pay a whole list of workers by M-Pesa in one approved batch instead of one by one in the portal: upload a CSV, check it, one person approves, send. Nobody is paid twice, and anyone whose payment is uncertain is shown for checking instead of being paid again. **Honest status: it has not paid anyone through real M-Pesa yet.** Safaricom's shared sandbox credential is locked (`8006`), so payroll is tested against a local fake of Daraja and a simulated M-Pesa only. [What that means](#payroll-paying-a-list-of-people-v010).
+
 ## Where the AI is, and where it is not
 
 The rule: **code and M-Pesa's own answers make every money decision; the model explains, ranks and proposes.**
@@ -59,16 +61,17 @@ Two days against the real Daraja sandbox (19-20 Oct 2026) overturned assumptions
 
 | | |
 |---|---|
-| Tests | 380, run in CI on every push |
+| Tests | 429, run in CI on every push |
 | Chaos test | hostile simulated world (lost callbacks, false failures, crashes at six points): **0** double charges, wrong applies, unapproved refunds or retry overruns; a naive executor in the same world fails |
-| Mutation testing | 76 deliberate bugs injected across the executor, adapters, webhook receiver and reversal handling; every one caught by a named test |
+| Mutation testing | 89 deliberate bugs injected across the executor, adapters, webhook receiver, reversal handling and payroll; every one caught by a named test |
 | Model, synthetic data | unknown failure messages explained 0/28 → 19/28; link recall 0.73 → 0.80 at unchanged precision 0.96; **0** safety violations |
-| Postgres | schema and 35 constraint checks pass on PostgreSQL 16 |
+| Postgres | schema and 49 constraint checks pass on PostgreSQL 16 |
+| Payroll | **not run against real M-Pesa** (sandbox credential locked); fake Daraja, simulated M-Pesa and a chaos test (8 seeds, 4 senders at once): nobody paid twice |
 
 ## Try it
 
 * **Watch:** the [2-minute walkthrough](https://www.loom.com/share/8a748f2dcdec494d8d00ac01fc39ea72).
-* **In the browser:** [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app). The demo is the real sandbox data with phone numbers masked; M-Pesa is offline there, so nothing anyone clicks can move money. Approve the Shiku decision, then *Apply fixes*.
+* **In the browser:** [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app). The demo is the real sandbox data with phone numbers masked; M-Pesa is offline there, so nothing anyone clicks can move money. Approve the Shiku decision, then *Apply fixes*. For payroll, pick **Payroll** in the sidebar, *Use the demo list*, approve, send (to a simulated M-Pesa).
 * **On your machine:**
 
 ```bash
@@ -79,7 +82,7 @@ python -m payrecon.recover demo               # narrated run on 300 synthetic in
 
 Everything below is the engineering detail: setup against your own Daraja sandbox, the design, results, and limits.
 
-> **Version history (v0.9).** Deterministic reconciliation engine and action policy (v0.1), an AI investigation layer (v0.2), a **recovery executor** (v0.3), **live adapters** (v0.4: SQL books and ledger, a Daraja gateway for STK push and reversal, an outbox, encrypted payer numbers, `sandbox-check`) and a **webhook receiver** (v0.5: authenticated by a secret path, durable inbox, de-duplication, successes verified with Daraja before they touch the ledger) and **sandbox tools for reversals and C2B** (v0.6: `sandbox-check --reverse`, `c2b-register`, `sandbox-check --c2b-simulate`, a C2B validation endpoint). v0.7 connects the AI investigator to the live books and ledger (`investigate --db`, `plan --ai`); v0.8 records reversals payrecon did not start, so reversed money is never applied or refunded again; v0.9 adds a web dashboard (Streamlit) with a hostable demo. Several Daraja behaviours have now been checked against the live sandbox (token, STK push, STK query, a cancellation callback, and a success callback verified and recorded through the receiver; see [Checked against the live sandbox](#checked-against-the-live-sandbox-2026-10-19-first-run)); plus C2B registration and confirmation, and a reversal request and its (failed) result; a successful reversal has not been seen. Not built yet: real authentication (see [Roadmap](#roadmap)).
+> **Version history (v0.10).** Deterministic reconciliation engine and action policy (v0.1), an AI investigation layer (v0.2), a **recovery executor** (v0.3), **live adapters** (v0.4: SQL books and ledger, a Daraja gateway for STK push and reversal, an outbox, encrypted payer numbers, `sandbox-check`) and a **webhook receiver** (v0.5: authenticated by a secret path, durable inbox, de-duplication, successes verified with Daraja before they touch the ledger) and **sandbox tools for reversals and C2B** (v0.6: `sandbox-check --reverse`, `c2b-register`, `sandbox-check --c2b-simulate`, a C2B validation endpoint). v0.7 connects the AI investigator to the live books and ledger (`investigate --db`, `plan --ai`); v0.8 records reversals payrecon did not start, so reversed money is never applied or refunded again; v0.9 adds a web dashboard (Streamlit) with a hostable demo; v0.10 adds **payroll** (B2C bulk payouts), tested only against the fake and a simulator. Several Daraja behaviours have now been checked against the live sandbox (token, STK push, STK query, a cancellation callback, and a success callback verified and recorded through the receiver; see [Checked against the live sandbox](#checked-against-the-live-sandbox-2026-10-19-first-run)); plus C2B registration and confirmation, and a reversal request and its (failed) result; a successful reversal has not been seen. Not built yet: real authentication (see [Roadmap](#roadmap)).
 
 ## Setup: what to install
 
@@ -479,6 +482,41 @@ Records (invoices, money returned, webhook payments, the audit trail with its ta
 
 **Tested how:** the logic is tested directly, and the page is driven in tests through a stand-in for the `streamlit` module (render, Plan, Approve, Execute, Reset). Streamlit itself could not be installed where this was built, so the page has not been run in a real browser by me; the first real run is yours.
 
+## Payroll: paying a list of people (v0.10)
+
+**The problem.** A business paying 30 workers every week through the M-Pesa portal sends 30 separate payments by hand: an hour of typing numbers and amounts, where one slip pays the wrong person or pays someone twice, and a payment that "hangs" invites sending it again.
+
+**What payroll does.** Upload the week's list once; payrecon checks it, a person approves the whole batch, and payrecon sends every payment through Daraja's B2C API, then tracks each one until M-Pesa says it was paid or failed.
+
+```bash
+# PAYRECON_APPROVERS=mike, plus the Daraja settings below
+python -m payrecon.recover payroll import  --db app.db --batch 2026-W43 --file examples/payroll_example.csv --as mike
+python -m payrecon.recover payroll approve --db app.db --batch 2026-W43 --as mike
+python -m payrecon.recover payroll send    --db app.db --batch 2026-W43              # dry run: who would be paid, total
+python -m payrecon.recover payroll send    --db app.db --batch 2026-W43 --execute    # results arrive on `serve`
+python -m payrecon.recover payroll report  --db app.db --batch 2026-W43
+python -m payrecon.recover payroll resolve --db app.db --batch 2026-W43 --line 4 --paid --receipt UJK... --as mike
+python -m payrecon.recover payroll requeue --db app.db --batch 2026-W43 --as mike   # send FAILED lines again
+```
+
+The CSV needs `name, phone, amount` (common alternatives such as *Employee*, *Phone Number*, *Salary* are accepted). In the dashboard, choose **Payroll** in the sidebar: upload, approve, send, and a "Needs you" list for anyone who needs checking.
+
+**The safety rules** (each one a test; the payroll mutants are all caught):
+
+* **The whole file is checked before anything is stored**, and every problem is listed at once: non-Safaricom numbers, the same number twice, cents, amounts above the per-person limit (KSh 150,000) or a batch above KSh 3,000,000, blank names. One bad line means nothing is imported.
+* **Nothing is sent until a person approves the batch.** Machine identities (`system`, `payroll`, `ai-*`) and anyone not in `PAYRECON_APPROVERS` are refused. The AI has no part in payroll at all.
+* **Each person is paid at most once per batch.** A line is claimed (`QUEUED → SENDING`, compare-and-swap) and its request ID recorded before the request leaves; pressing *Send* twice, or two senders at once, sends each line once.
+* **"Accepted" is not "paid".** M-Pesa first accepts the request, then posts the result later. A line is `PAID` only when that result arrives, with its receipt; the receiver strips the payee's name from stored results.
+* **A payment that may have gone is never sent again by itself.** A timeout, a lost connection or a sender that crashed mid-request leaves the line `UNKNOWN`. A person checks the M-Pesa statement and marks it paid (with the receipt) or not paid. A late result also settles it.
+* **Only a definite failure can be retried**, by a person, as a new attempt with a new request ID. A failure result that arrives after a confirmed payment does not undo it.
+* Phone numbers are encrypted at rest and shown masked (`2547****678`).
+
+**Honest status: what has and has not been tested.**
+
+* **Not tested against real M-Pesa.** B2C needs an *Initiator* and its *SecurityCredential*, the same as reversals. The Daraja sandbox's shared test initiator (`testapi`) answered `8006` ("the security credential is locked") every time it was tried on 19-20 Oct 2026, so no B2C request has reached Safaricom from this project. The request shape (`/mpesa/b2c/v3/paymentrequest`, `OriginatorConversationID`, `CommandID`, `PartyA/B`, `ResultURL`, `QueueTimeOutURL`) and the result shape come from Safaricom's documentation, not from a live answer. Expect the first live run to find differences, as STK push, C2B and reversals each did.
+* **What it has been tested against:** a local fake of Daraja (request validation, results through the real webhook receiver), a simulated M-Pesa (failures, uncertain sends, late results), a chaos test over 8 seeds and four concurrent senders (no one paid twice; every paid person ends `PAID`, `UNKNOWN` or `ACCEPTED`, never queued to pay again), and the Postgres constraints.
+* **Real use needs a Safaricom business account with B2C (bulk payment) enabled** and your own initiator, plus a funded B2C utility account, `DARAJA_B2C_SHORTCODE` and the result URLs (derived from `DARAJA_CALLBACK_URL` like the others; see `.env.example`). Safaricom's own bulk tools, and banks and payroll services, already do this job; payrecon's part is the checks, the approval and never paying twice.
+
 ## Layout
 
 ```
@@ -512,8 +550,9 @@ src/payrecon/
     outbox.py       customer-notice outbox
     security.py     encrypted payer numbers; SecurityCredential for reversals
     fake_daraja.py  local fake Daraja with fault injection (tests and live-demo)
+  payroll.py                              payroll (B2C): CSV checks, approval, send at most once, results, UNKNOWN handling
   webhook.py                              receiver: auth, inbox, dedup, verified successes, quarantine, replay, HTTP server
-  recover.py livecli.py                   CLI: demo, queue, audit, init-db, import-csv, plan, run, approve, reject, sandbox-check, live-demo, serve, webhook-inbox, webhook-replay, c2b-register
+  recover.py livecli.py                   CLI: demo, queue, audit, init-db, import-csv, plan, run, approve, reject, sandbox-check, live-demo, serve, webhook-inbox, webhook-replay, c2b-register, payroll
 schema.sql                                Postgres: invoices, transactions, results, recovery_actions, escalations, audit_log, adapter tables
 scripts/check_schema_postgres.sh          loads schema.sql into a throwaway database and checks its constraints
 tests/                                    engine, providers, AI layer, adversarial-LLM, store, executor, guards, chaos
@@ -522,23 +561,24 @@ tests/                                    engine, providers, AI layer, adversari
 ## Privacy and limits
 
 * **Customer names and provider messages are sent to the LLM provider** when `--llm anthropic` is on (masked phone numbers are not). Keep real customer data out unless your data-processing terms cover it. This repo is built for synthetic data.
-* **Verification status.** No Daraja HTTP call (token, STK push, query, reversal) has been run against the live sandbox; see "Unverified against live Daraja" above. Result codes come from the public docs as I remember them; confirm against current Daraja documentation. The Anthropic client has been run against the live API with `claude-haiku-5-5` only (results above); other models are untested.
+* **Verification status.** Token, STK push and query, callbacks, C2B registration and confirmation, and a reversal request and its result have run against the live sandbox. A *successful* reversal and **any B2C payroll payment** have not: Safaricom's shared test credential is locked (`8006`). Other result codes come from the public docs. The Anthropic client has been run against the live API with `claude-haiku-5-5` only (results above); other models are untested.
 * `schema.sql` (including the recovery tables) was applied to PostgreSQL 16 and its constraints exercised: the approval `CHECK`, the unique idempotency key, the append-only audit triggers and one open review item per case. The action store is SQLite (single machine). The books, ledger and gateway adapters can take a `postgres://` URL, but that path has not run from Python (no driver was available here); only the schema and its constraints were verified on Postgres.
 * Reference normalization can map a typo onto a different valid invoice; the amount check catches most but not all.
 * A payer paying a different amount than outstanding (instalments of an unknown size) is not linked by the AI layer.
 * **The executor has only run against my simulator.** Its invariants are checked against that world's truth, which shows the code keeps its promises under those faults, not how Daraja behaves. v0.4 adds real adapters for those ports, but they have only run against a fake Daraja, so Daraja's real behaviour is still untested.
 * **At-most-once means some cases need a person.** Any ambiguity after a push or refund becomes `UNKNOWN`. In the hostile chaos runs 42 actions ended that way across 30 seeds.
 * **A race remains that no code can close:** a customer who pays by another channel in the moments between the guard's last check and the push. The push still needs the customer's PIN, and the cooldown, retry limit and amount ceiling bound the exposure.
-* **Refunds are not yet visible to the engine.** There is no `REVERSED` status, so after a refund the engine still reads two payments. The planner will not propose the same refund again, and a ledger adapter must record reversals.
+* **Reversals reach the engine through the ledger** (`REVERSED`, v0.8): from a completed refund's result, or from the statement CSV. Pulling them from Daraja automatically is not built.
 * **A status recheck cannot apply anything:** Daraja's STK query returns no receipt or amount, so a "success" with no matching callback becomes a review item.
 * **Reversals are fire-and-confirm-later.** The result arrives on `ResultURL` (the receiver applies it); until it does, a refund stays `ACCEPTED`, and it still blocks a second attempt. A reversal timeout is only noted: a person must check whether it happened.
 * **The receiver's authenticity is a secret URL**, not a signature (Daraja offers none). See the receiver section for what that does and does not protect.
+* **Payroll `UNKNOWN` lines need a person** with the M-Pesa statement; payrecon will not guess. Payroll has no AI step and no schedule: someone runs *send*.
 * Roles are a plain mapping, not authentication. `max_retries` can only lower the limit, because the engine's own cap (`policy.MAX_RETRIES`) also applies.
 
 ## Roadmap
 
-1. Ask Daraja's Transaction Status API before an auto-apply or a refund, and pull reversals from the statement automatically instead of a CSV; a successful payrecon-initiated reversal (blocked by the locked `testapi` credential); run the executor against the sandbox end to end; run the adapters against Postgres from Python; an SMS sender for the outbox; register the C2B URL.
-2. A `REVERSED` status in the engine so refunds are visible to reconciliation.
+1. Run payroll against real M-Pesa (needs an unlocked initiator or a business B2C account), and use Daraja's Transaction Status API to settle `UNKNOWN` payroll lines automatically. Ask Daraja's Transaction Status API before an auto-apply or a refund, and pull reversals from the statement automatically instead of a CSV; a successful payrecon-initiated reversal (blocked by the locked `testapi` credential); run the executor against the sandbox end to end; run the adapters against Postgres from Python; an SMS sender for the outbox; register the C2B URL.
+2. Payroll: scheduled weekly batches, a second approver above a set total, and SMS receipts to workers.
 3. Signals not yet used for linking: the phone number that made a failed attempt on an invoice.
 4. FastAPI webhook receiver, then Celery + Redis for scheduled runs and rechecks.
 5. Real sign-in for the dashboard (it trusts `PAYRECON_APPROVERS`, so it is for your own machine), and charts over time.

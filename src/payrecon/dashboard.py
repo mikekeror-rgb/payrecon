@@ -230,6 +230,34 @@ class Dashboard:
         out["offline"] = isinstance(gw, OfflineGateway)
         return out
 
+    # ---- payroll ------------------------------------------------------------------------------------------
+
+    def payroll(self):
+        """The payroll service for this data. Demo: a simulated M-Pesa (numbers ending 0000 fail, 1111 time out)."""
+        from .adapters.security import PiiBox
+        from .payroll import PayrollService, SimulatedPayouts
+
+        if getattr(self, "_payroll", None) is None:
+            if self.offline:
+                self._payouts = SimulatedPayouts()
+                self._payroll = PayrollService(self.db, self._payouts, PiiBox(None, allow_plaintext=True))
+            else:
+                from .livecli import OfflineGateway, build_gateway
+
+                gw = build_gateway(self.db, self.ledger)
+                port = None if isinstance(gw, OfflineGateway) else gw
+                pii = gw.pii if port else PiiBox(os.environ.get("PAYRECON_PII_KEY"), allow_plaintext=True)
+                self._payouts = None
+                self._payroll = PayrollService(self.db, port, pii)
+        return self._payroll
+
+    def payroll_send(self, batch_id: str) -> dict[str, Any]:
+        """Send the queued lines; in the demo the simulated results arrive straight away."""
+        r = self.payroll().send(batch_id, execute=True)
+        if self._payouts is not None:
+            r["results"] = self._payouts.deliver(self.payroll())
+        return r
+
     def close(self) -> None:
         self.db.close()
         self.store.close()

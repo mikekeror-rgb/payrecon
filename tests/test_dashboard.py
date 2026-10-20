@@ -92,11 +92,14 @@ class _FakeStreamlit(types.ModuleType):
     def expander(self, *a, **k):
         return _Ctx()
 
+    def file_uploader(self, *a, **k):
+        return None
+
     def dataframe(self, rows, **k):
         self.shown.append(f"table:{len(rows)}")
 
     def radio(self, label, options, **k):
-        return options[0]
+        return self.views.get(label, options[0]) if hasattr(self, "views") else options[0]
 
     def selectbox(self, label, options, **k):
         return options[0]
@@ -191,3 +194,45 @@ def test_an_applied_ai_link_counts_for_its_invoice_afterwards(tmp_path):
     assert "UJK030FG5W" not in {e["subject"] for e in s["exceptions"]}
     assert "UJK030FG5W" not in {r["payment"] for r in s["links"]}
     assert "proposed 0 new" in d.plan(ai=True, llm=RecordedModel())  # nothing is proposed for it again
+
+
+
+def test_the_payroll_page_imports_approves_sends_and_shows_who_needs_checking(tmp_path):
+    import os
+
+    saved = sys.modules.get("streamlit"), os.environ.pop("PAYRECON_DASHBOARD_LOCAL", None)
+    sys.modules["streamlit"] = _ST
+    sys.modules.pop("payrecon.dashboard_app", None)
+    try:
+        _ST.session_state.clear()
+        _ST.session_state["demo_folder"] = str(tmp_path)
+        _ST.views = {"View": "Payroll"}
+        out = _page()
+        assert "Payroll" in out and "simulated M-Pesa" in out and "Upload" in out
+        _page({"Use the demo list"})
+        out = _page()
+        assert "Imported 8 people" in out and "Pay 8 people" in out
+        _page({"Approve batch"})
+        out = _page()
+        assert "Approved by demo-approver" in out and "8 payment(s) ready to send" in out
+        _page({"Send payments"})
+        out = _page()
+        assert "7 sent and accepted" in out and "1 unknown" in out
+        assert "Brian Mutua" in out and "Failed: nothing was paid" in out      # the 0000 number
+        assert "Aisha Hassan" in out and "Unknown: check before doing anything" in out  # the 1111 number
+        p = _ST.session_state["dash"].payroll()
+        batch = p.batches()[0]["batch"]
+        assert p.report(batch)["counts"] == {"PAID": 6, "FAILED": 1, "UNKNOWN": 1}
+        pid = [r for r in p.lines(batch) if r["name"] == "Aisha Hassan"][0]["payout_id"]
+        _page({f"no{pid}"})
+        out = _page({"Send the 2 failed payment(s) again"})
+        assert p.report(batch)["counts"].get("QUEUED") == 2
+    finally:
+        _ST.views = {}
+        sys.modules.pop("payrecon.dashboard_app", None)
+        if saved[0] is None:
+            sys.modules.pop("streamlit", None)
+        else:
+            sys.modules["streamlit"] = saved[0]
+        if saved[1] is not None:
+            os.environ["PAYRECON_DASHBOARD_LOCAL"] = saved[1]
