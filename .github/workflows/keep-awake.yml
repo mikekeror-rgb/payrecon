@@ -1,0 +1,23 @@
+name: keep-awake
+
+# Visits the hosted Streamlit demo every 6 hours so it does not go to sleep, and wakes it if it already has.
+# Set the app's address once: GitHub repo -> Settings -> Secrets and variables -> Actions -> Variables ->
+# New repository variable, name STREAMLIT_APP_URL, value https://<your-app>.streamlit.app
+# GitHub turns scheduled workflows off after 60 days without commits; re-enable it from the Actions tab if so.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    if: ${{ vars.STREAMLIT_APP_URL != '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - run: python scripts/wake_streamlit.py "${{ vars.STREAMLIT_APP_URL }}"
