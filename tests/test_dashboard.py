@@ -84,7 +84,13 @@ class _FakeStreamlit(types.ModuleType):
     def _show(self, *a, **k):
         self.shown.append(" ".join(str(x) for x in a))
 
-    set_page_config = title = caption = markdown = write = subheader = info = warning = error = metric = divider = _show
+    set_page_config = title = caption = markdown = write = subheader = info = warning = error = success = metric = divider = _show
+
+    def toggle(self, label, value=False, **k):
+        return value
+
+    def expander(self, *a, **k):
+        return _Ctx()
 
     def dataframe(self, rows, **k):
         self.shown.append(f"table:{len(rows)}")
@@ -152,14 +158,20 @@ def _drive_page(tmp_path):
     _ST.session_state.clear()
     _ST.session_state["demo_folder"] = str(tmp_path)
     out = _page()
-    assert "Payment reconciliation" in out and "Demo data" in out and "REVERSED_PAYMENT" in out and "L3" in out
-    out = _page({"Plan actions"})
-    assert "proposed" in out and "need approval" in out
+    # plain words on the page, and the demo arrives with its fixes planned (AI on, recorded answers)
+    assert "Payment reconciliation" in out and "M-Pesa offline" in out
+    assert "Money went back to the customer" in out and "Paid twice" in out and "AI suggestion" in out
+    assert "Grace Wanjiku" in out and "Shiku" in out
+    assert "AMOUNT_MISMATCH" not in out  # codes stay out of the main view
     d = _ST.session_state["dash"]
-    first = d.snapshot()["approvals"][0]["id"]
-    _page({f"ok{first}"})
-    assert any(a["id"] == first and a["status"] == "APPROVED" for a in d.snapshot()["actions"])
-    out = _page({"Execute"})
-    assert "executed: done" in out and "offline" in out
+    waiting = d.snapshot()["approvals"]
+    shiku = [a for a in waiting if a["invoice"] == "L6"][0]["id"]
+    _page({f"ok{shiku}"})
+    assert any(a["id"] == shiku and a["status"] == "APPROVED" for a in d.snapshot()["actions"])
+    _page({"Apply fixes"})
+    out = _page()  # Streamlit reruns after the click; the result shows on that run
+    assert "fix(es) applied" in out and "offline" in out
+    assert [i for i in d.snapshot()["invoices"] if i["invoice"] == "L6"][0]["books"] == "PAID"
     out = _page({"Reset demo"})
-    assert _ST.session_state["dash"].snapshot()["actions"] == []
+    acts = _ST.session_state["dash"].snapshot()["actions"]
+    assert acts and all(a["status"] == "PROPOSED" for a in acts)  # back to a fresh, freshly planned demo

@@ -112,6 +112,8 @@ class Dashboard:
         cats = Counter(r.category.value for r in report.invoices.values())
         problems = [i for i in air.investigations]
         waiting = [a for a in self.store.list_actions(ActionStatus.PROPOSED) if a.requires_approval]
+        inv_by_id = {i.invoice_id: i for i in invoices}
+        txn_by_id = {t.provider_txn_id: t for t in txns}
         return {
             "summary": {
                 "invoices": len(invoices),
@@ -124,7 +126,7 @@ class Dashboard:
                 "categories": dict(cats),
             },
             "invoices": [
-                {"invoice": i.invoice_id, "reference": i.reference, "amount": float(i.amount), "books": i.internal_status.value,
+                {"invoice": i.invoice_id, "reference": i.reference, "customer": i.customer_name or "", "amount": float(i.amount), "books": i.internal_status.value,
                  "category": report.invoices[i.invoice_id].category.value, "action": report.invoices[i.invoice_id].action.value,
                  "payments": ", ".join(report.invoices[i.invoice_id].txn_ids)}
                 for i in invoices
@@ -143,7 +145,7 @@ class Dashboard:
             "approvals": [
                 {"id": a.action_id, "type": a.action_type.value, "invoice": a.invoice_id, "proposed_by": a.proposed_by,
                  "details": ", ".join(f"{k}={v}" for k, v in a.payload.items() if k not in ("rationale",)),
-                 "rationale": a.payload.get("rationale", "")}
+                 "rationale": a.payload.get("rationale", ""), "headline": self._headline(a, inv_by_id, txn_by_id)}
                 for a in waiting
             ],
             "reviews": [_row(e) for e in self.store.open_escalations()],
@@ -171,6 +173,24 @@ class Dashboard:
             "halted": self.store.halted(),
             "warnings": air.warnings,
         }
+
+    @staticmethod
+    def _headline(a, inv_by_id, txn_by_id) -> str:
+        """One plain sentence for a decision, for people who do not read action codes."""
+        inv = inv_by_id.get(a.invoice_id)
+        who = f"{inv.customer_name}'s invoice {inv.reference}" if inv and inv.customer_name else f"invoice {a.invoice_id}"
+        p = a.payload
+        kind = a.action_type.value
+        if kind == "APPLY_LINKED_PAYMENT":
+            t = txn_by_id.get(p.get("txn_id", ""))
+            typed = f' (the payer typed "{t.reference_raw}")' if t and t.reference_raw else ""
+            return f"Count payment {p.get('txn_id')} of KSh {float(p.get('amount', 0)):,.0f}{typed} towards {who}?"
+        if kind == "REFUND_DUPLICATE":
+            return (f"{who} was paid twice. Refund the extra KSh {float(p.get('amount', 0)):,.0f} "
+                    f"({p.get('refund_txn_id')}) and keep {p.get('keep_txn_id')}?")
+        if kind == "RETRY_PUSH":
+            return f"Send the customer a new payment prompt for {who}?"
+        return f"{kind.replace('_', ' ').capitalize()} for {who}?"
 
     # ---- acting -----------------------------------------------------------------------------------------
 

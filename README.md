@@ -386,10 +386,13 @@ python -m payrecon.recover dashboard        # http://127.0.0.1:8501 : the demo, 
 
 A Streamlit page over `payrecon/dashboard.py`. Every button calls the same planner, approval desk and executor as the CLI, so the rules do not change: machine identities cannot approve, refunds and AI links need an approver, Execute re-checks fresh data before acting, every step goes into the hash-chained audit log.
 
-* **Problems:** ranked by money at stake, with the plain-English explanation, the failure reason and where it came from, and the link proposals for unlinked payments (who decided: code or model).
-* **Approvals:** each waiting action with Approve / Reject and a note; the review items with no automatic action; every action and its status.
-* **Invoices, Payments in** (the webhook inbox), **Reversals and refunds, Audit** (with the chain check).
-* **Sidebar:** data source, who you act as, the model (off, live Claude, or for the demo the recorded answers), and Plan / Dry run / Execute.
+One page, three steps, in plain words (no action codes in the main view):
+
+1. **What is wrong:** a card per problem, colour-coded ("Paid twice", "Wrong amount", "Money went back to the customer", "Payment with no invoice", ...), with the amount at stake, the explanation, what happens next, and an **AI suggestion** tag where the model proposed or declined a link.
+2. **Your decisions:** one sentence per decision ("Count payment UJK030FG5W of KSh 50 (the payer typed "Shiku") towards Grace Wanjiku's invoice INV-0006?") with Approve / Reject.
+3. **Apply the fixes:** one button; marks confirmed payments paid, notifies customers, carries out what you approved, after re-checking fresh data.
+
+Records (invoices, money returned, webhook payments, the audit trail with its tamper check) sit in collapsed sections below. The sidebar holds only the data source and a **Use AI** switch; who you act as, a dry run and resetting the demo are under *Advanced*. The demo opens with its fixes already planned, so there is something to decide straight away. Theme: `.streamlit/config.toml`.
 
 **The demo** is the real sandbox data from 19-20 Oct 2026 (`examples/demo_*.csv`, phone numbers masked): the C2B payment that is safe to apply, the C2B duplicate, TEST6's two payments that Safaricom reversed, the 1,500 invoice paid KSh 1, the cancelled TEST4 push, and the Shiku / for peter / school fees payments. Daraja is forced offline in the demo, so Execute can apply confirmed payments but can never send a push or a refund. "Recorded Claude answers" replays what claude-haiku-5-5 answered on those payments in the live run (Shiku → Grace Wanjiku, school fees → NONE) so the model's part is visible without an API key; it is labelled as a recording and has no answer for anything else.
 
