@@ -152,8 +152,12 @@ def reconcile(
     invoices: Iterable[Invoice],
     txns: Iterable[ProviderTxn],
     retry_counts: Mapping[str, int] | None = None,
+    applied: Mapping[str, str] | None = None,
 ) -> ReconciliationReport:
+    """`applied` maps provider_txn_id -> invoice_id for payments already applied to an invoice in the books (an
+    approved inferred link, say). Such a payment counts for that invoice even when its reference does not match it."""
     invoices = list(invoices)
+    applied = applied or {}
     retry_counts = retry_counts or {}
     unique, warnings = dedupe_txns(txns)
 
@@ -170,9 +174,10 @@ def reconcile(
 
     linked: dict[str, list[ProviderTxn]] = defaultdict(list)
     unlinked: list[ProviderTxn] = []
+    by_id = {inv.invoice_id: inv for inv in invoices}
     for t in unique:
         key = normalize_reference(t.reference_raw)
-        owner = index.get(key) if key is not None else None
+        owner = by_id.get(applied.get(t.provider_txn_id, "")) or (index.get(key) if key is not None else None)
         if owner is None:
             unlinked.append(t)
         else:

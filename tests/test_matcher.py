@@ -180,3 +180,17 @@ def test_unrelated_pending_is_not_folded():
     r = reconcile([_fold_inv()], [_fold_txn("ws_CO_9", TxnStatus.PENDING), _fold_txn("RCPT1", TxnStatus.SUCCESS, "ws_CO_1")])
     assert sorted(r.invoices["I1"].txn_ids) == ["RCPT1", "ws_CO_9"]
     assert r.invoices["I1"].action.value == "RECHECK_STATUS"  # a different pending push still blocks apply
+
+
+def test_a_payment_applied_to_an_invoice_counts_for_it_whatever_its_reference():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from payrecon.matcher import reconcile
+    from payrecon.models import Category, InternalStatus, Invoice, ProviderTxn, TxnStatus
+    t0 = datetime(2026, 10, 20, tzinfo=timezone.utc)
+    inv = Invoice("L6", "INV-0006", Decimal(50), InternalStatus.PAID, t0, "Grace Wanjiku")
+    pay = ProviderTxn("P1", Decimal(50), TxnStatus.SUCCESS, t0, "Shiku", None, "0", "c2b_confirmation")
+    assert reconcile([inv], [pay]).invoices["L6"].category is Category.MISSING_PAYMENT
+    r = reconcile([inv], [pay], applied={"P1": "L6"})
+    assert r.invoices["L6"].category is Category.MATCHED and r.orphans == {}
+    assert reconcile([inv], [pay], applied={"P1": "NOPE"}).orphans  # a link to an unknown invoice changes nothing

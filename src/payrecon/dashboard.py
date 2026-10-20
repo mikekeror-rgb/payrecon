@@ -107,7 +107,7 @@ class Dashboard:
 
     def snapshot(self, llm: LLMClient | None = None, max_llm_calls: int = 20) -> dict[str, Any]:
         invoices, txns = self.books.invoices(), self.ledger.all_txns()
-        report = reconcile(invoices, txns, self.store.retry_counts())
+        report = reconcile(invoices, txns, self.store.retry_counts(), self.books.applications())
         air = investigate(report, invoices, txns, llm, max_llm_calls)
         cats = Counter(r.category.value for r in report.invoices.values())
         problems = [i for i in air.investigations]
@@ -196,9 +196,10 @@ class Dashboard:
 
     def plan(self, ai: bool = True, llm: LLMClient | None = None) -> str:
         invoices, txns = self.books.invoices(), self.ledger.all_txns()
-        kw: dict[str, Any] = {}
+        applied = self.books.applications()
+        kw: dict[str, Any] = {"applied": applied}
         if ai:
-            kw["link_proposals"] = investigate(reconcile(invoices, txns), invoices, txns, llm).link_proposals
+            kw["link_proposals"] = investigate(reconcile(invoices, txns, applied=applied), invoices, txns, llm).link_proposals
         _, pr = plan_from_data(invoices, txns, self.store, **kw)
         kinds = Counter(a.action_type.value for a in pr.proposed)
         return (f"proposed {len(pr.proposed)} new action(s) {dict(kinds) if kinds else ''}; "

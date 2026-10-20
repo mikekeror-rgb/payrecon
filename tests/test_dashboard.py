@@ -175,3 +175,19 @@ def _drive_page(tmp_path):
     out = _page({"Reset demo"})
     acts = _ST.session_state["dash"].snapshot()["actions"]
     assert acts and all(a["status"] == "PROPOSED" for a in acts)  # back to a fresh, freshly planned demo
+
+
+def test_an_applied_ai_link_counts_for_its_invoice_afterwards(tmp_path):
+    """Seen in the hosted demo: after approving Shiku -> L6 and applying, L6 said PAID in the books but 'not paid yet',
+    and the payment was still listed as having no invoice, because reconciliation only matched by typed reference."""
+    d = Dashboard.demo(str(tmp_path))
+    d.plan(ai=True, llm=RecordedModel())
+    shiku = [a for a in d.snapshot()["approvals"] if a["invoice"] == "L6"][0]["id"]
+    d.approve(shiku, DEMO_APPROVER)
+    d.run(execute=True)
+    s = d.snapshot(RecordedModel())
+    l6 = [i for i in s["invoices"] if i["invoice"] == "L6"][0]
+    assert (l6["books"], l6["category"], l6["payments"]) == ("PAID", "MATCHED", "UJK030FG5W")
+    assert "UJK030FG5W" not in {e["subject"] for e in s["exceptions"]}
+    assert "UJK030FG5W" not in {r["payment"] for r in s["links"]}
+    assert "proposed 0 new" in d.plan(ai=True, llm=RecordedModel())  # nothing is proposed for it again

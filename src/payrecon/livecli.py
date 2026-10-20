@@ -168,11 +168,11 @@ def cmd_plan(args) -> int:
         from .investigate import make_llm
         from .matcher import reconcile
 
-        air = investigate(reconcile(invoices, txns), invoices, txns, make_llm(args.llm, args.model))
+        air = investigate(reconcile(invoices, txns, applied=books.applications()), invoices, txns, make_llm(args.llm, args.model))
         kw["link_proposals"] = air.link_proposals
         linked = [p for p in air.link_proposals if p.invoice_id]
         print(f"AI: {len(linked)} link proposal(s) for unlinked payments, {len(air.link_proposals) - len(linked)} abstained; LLM calls {air.llm_calls}")
-    report, pr = plan_from_data(invoices, txns, store, **kw)
+    report, pr = plan_from_data(invoices, txns, store, applied=books.applications(), **kw)
     print(f"proposed {len(pr.proposed)} ({_fmt(Counter(a.action_type.value for a in pr.proposed))}); "
           f"{sum(a.requires_approval for a in pr.proposed)} need approval; already known {pr.existing}; "
           f"review items opened {pr.new_escalations}; skipped {len(pr.skipped)}")

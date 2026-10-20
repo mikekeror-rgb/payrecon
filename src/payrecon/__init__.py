@@ -1,3 +1,3 @@
 """payrecon: payment reconciliation and safe recovery (sandbox-first, M-Pesa Daraja)."""
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"

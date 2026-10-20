@@ -51,6 +51,10 @@ class SqlBooks:
         r = self.db.execute(f"SELECT {_COLS} FROM invoices WHERE reference_norm = ?", (key,)).fetchone()
         return _invoice(r) if r else None
 
+    def applications(self) -> dict[str, str]:
+        """provider_txn_id -> invoice_id for every payment applied in the books."""
+        return dict(self.db.execute("SELECT provider_txn_id, invoice_id FROM payment_applications").fetchall())
+
     def paid_by(self, provider_txn_id: str) -> str | None:
         r = self.db.execute("SELECT invoice_id FROM payment_applications WHERE provider_txn_id = ?", (provider_txn_id,)).fetchone()
         return r[0] if r else None

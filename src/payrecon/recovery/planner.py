@@ -137,5 +137,6 @@ def plan(
 
 def plan_from_data(invoices: Sequence[Invoice], txns: Sequence[ProviderTxn], store: ActionStore, **kw) -> tuple[ReconciliationReport, PlanResult]:
     """Reconcile with retry counts taken from the durable store, then plan."""
-    report = reconcile(invoices, txns, store.retry_counts())
+    applied = kw.pop("applied", None)
+    report = reconcile(invoices, txns, store.retry_counts(), applied)
     return report, plan(report, invoices, txns, store, **kw)

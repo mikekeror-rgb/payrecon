@@ -30,6 +30,7 @@ def load_data(args: argparse.Namespace) -> tuple[list[Invoice], list[ProviderTxn
         if db.dialect == "sqlite":
             db.script(SQLITE_DDL)
             migrate_sqlite(db)
+        args._applied = SqlBooks(db).applications()
         return SqlBooks(db).invoices(), SqlLedger(db).all_txns()
     if args.data_dir:
         d = Path(args.data_dir)
@@ -108,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     invoices, txns = load_data(args)
-    report = reconcile(invoices, txns)
+    report = reconcile(invoices, txns, applied=getattr(args, "_applied", None))
     unique = len(dedupe_txns(txns)[0])
     print(f"{len(invoices)} invoices, {len(txns)} transaction records ({unique} unique)\n")
     air = investigate(report, invoices, txns, llm, args.max_llm_calls)
