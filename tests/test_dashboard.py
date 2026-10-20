@@ -1,0 +1,165 @@
+"""The dashboard: its logic (payrecon.dashboard) directly, and the Streamlit page driven through a stand-in module,
+so the page's wiring is exercised without Streamlit installed."""
+import importlib
+import sys
+import types
+
+from payrecon.dashboard import DEMO_APPROVER, Dashboard, RecordedModel
+
+
+def by(rows, key, value):
+    return [r for r in rows if r[key] == value]
+
+
+def test_the_demo_shows_the_live_findings_and_cannot_reach_daraja(tmp_path):
+    d = Dashboard.demo(str(tmp_path))
+    s = d.snapshot()
+    cats = {e["subject"]: e["category"] for e in s["exceptions"]}
+    assert cats["L3"] == "REVERSED_PAYMENT" and cats["L2"] == "DUPLICATE_PAYMENT" and cats["L5"] == "AMOUNT_MISMATCH"
+    assert cats["L10"] == "FAILED" and cats["UJK030FG5W"] == "ORPHANED_TXN"
+    assert {r["payment"] for r in s["reversed"]} == {"UJKA0AXL4X", "UJKA0AXOK2"}
+    assert s["summary"]["llm_calls"] == 0 and d.offline
+
+
+def test_recorded_answers_replay_the_live_model_and_nothing_else(tmp_path):
+    d = Dashboard.demo(str(tmp_path))
+    links = {r["payment"]: r for r in d.snapshot(RecordedModel())["links"]}
+    assert links["UJK030FG5W"]["invoice"] == "L6" and links["UJK030FG5W"]["decided_by"] == "llm" and links["UJK030FG5W"]["band"] == "MEDIUM"
+    assert links["UJK030FEM8"]["invoice"] == "" and links["UJK030FEM8"]["decided_by"] == "llm"
+    assert links["UJK030FG5X"]["invoice"] == "L7" and links["UJK030FG5X"]["decided_by"] == "heuristic"
+
+
+def test_plan_approve_and_execute_go_through_the_same_rules_as_the_cli(tmp_path):
+    d = Dashboard.demo(str(tmp_path))
+    assert "need approval" in d.plan(ai=True, llm=RecordedModel())
+    waiting = d.snapshot()["approvals"]
+    shiku = by(waiting, "invoice", "L6")[0]
+    refund = by(waiting, "type", "REFUND_DUPLICATE")[0]
+    assert shiku["proposed_by"] == "ai-assistant" and by(waiting, "invoice", "L7")[0]["proposed_by"] == "link-matcher"
+    assert d.approve(shiku["id"], "ai-assistant").startswith("refused") and "machine" in d.approve(shiku["id"], "ai-assistant")
+    assert d.approve(shiku["id"], "mallory").startswith("refused")
+    assert d.approve(shiku["id"], DEMO_APPROVER, "nickname checked with the customer").startswith("approved")
+    assert d.approve(refund["id"], DEMO_APPROVER).startswith("approved")
+    r = d.run(execute=True)
+    assert r["offline"] and r["unknown"] == 0
+    acts = {a["id"]: a for a in d.snapshot()["actions"]}
+    assert acts[shiku["id"]]["status"] == "DONE" and acts[shiku["id"]]["approved_by"] == DEMO_APPROVER
+    assert acts[refund["id"]]["status"] != "DONE"  # offline: the refund cannot be sent
+    inv = {i["invoice"]: i for i in d.snapshot()["invoices"]}
+    assert inv["L6"]["books"] == "PAID" and inv["L1"]["books"] == "PAID" and inv["L3"]["books"] == "UNPAID"
+    assert d.snapshot()["audit_ok"]
+
+
+def test_a_reset_demo_starts_clean(tmp_path):
+    d = Dashboard.demo(str(tmp_path))
+    d.plan()
+    assert d.snapshot()["actions"]
+    d.close()
+    assert Dashboard.demo(str(tmp_path)).snapshot()["actions"] == []
+
+
+# ---- the Streamlit page, through a stand-in ------------------------------------------------------------------
+
+class _Ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def __getattr__(self, name):  # columns: metric, button, ...
+        return getattr(_ST, name)
+
+
+class _Rerun(Exception):
+    pass
+
+
+class _FakeStreamlit(types.ModuleType):
+    def __init__(self):
+        super().__init__("streamlit")
+        self.session_state, self.secrets, self.clicks, self.shown = {}, {}, set(), []
+        self.sidebar = self
+
+    def _show(self, *a, **k):
+        self.shown.append(" ".join(str(x) for x in a))
+
+    set_page_config = title = caption = markdown = write = subheader = info = warning = error = metric = divider = _show
+
+    def dataframe(self, rows, **k):
+        self.shown.append(f"table:{len(rows)}")
+
+    def radio(self, label, options, **k):
+        return options[0]
+
+    def selectbox(self, label, options, **k):
+        return options[0]
+
+    def text_input(self, label, value="", **k):
+        return value
+
+    def checkbox(self, label, **k):
+        return True
+
+    def button(self, label, key=None, **k):
+        return (key or label) in self.clicks
+
+    def columns(self, spec):
+        return [_Ctx() for _ in range(spec if isinstance(spec, int) else len(spec))]
+
+    def tabs(self, names):
+        return [_Ctx() for _ in names]
+
+    def container(self, **k):
+        return _Ctx()
+
+    def rerun(self):
+        raise _Rerun()
+
+
+_ST = _FakeStreamlit()
+
+
+def _page(clicks=()):
+    _ST.clicks, _ST.shown = set(clicks), []
+    app = importlib.import_module("payrecon.dashboard_app")
+    try:
+        app.main()
+    except _Rerun:
+        pass
+    return " | ".join(_ST.shown)
+
+
+def test_the_streamlit_page_renders_plans_approves_and_executes(tmp_path):
+    import os
+
+    saved = sys.modules.get("streamlit"), os.environ.pop("PAYRECON_DASHBOARD_LOCAL", None)
+    sys.modules["streamlit"] = _ST
+    sys.modules.pop("payrecon.dashboard_app", None)
+    try:
+        _drive_page(tmp_path)
+    finally:
+        sys.modules.pop("payrecon.dashboard_app", None)
+        if saved[0] is None:
+            sys.modules.pop("streamlit", None)
+        else:
+            sys.modules["streamlit"] = saved[0]
+        if saved[1] is not None:
+            os.environ["PAYRECON_DASHBOARD_LOCAL"] = saved[1]
+
+
+def _drive_page(tmp_path):
+    _ST.session_state.clear()
+    _ST.session_state["demo_folder"] = str(tmp_path)
+    out = _page()
+    assert "Payment reconciliation" in out and "Demo data" in out and "REVERSED_PAYMENT" in out and "L3" in out
+    out = _page({"Plan actions"})
+    assert "proposed" in out and "need approval" in out
+    d = _ST.session_state["dash"]
+    first = d.snapshot()["approvals"][0]["id"]
+    _page({f"ok{first}"})
+    assert any(a["id"] == first and a["status"] == "APPROVED" for a in d.snapshot()["actions"])
+    out = _page({"Execute"})
+    assert "executed: done" in out and "offline" in out
+    out = _page({"Reset demo"})
+    assert _ST.session_state["dash"].snapshot()["actions"] == []

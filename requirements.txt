@@ -1,0 +1,5 @@
+# For Streamlit Community Cloud (the hosted demo). Locally: pip install -e '.[dashboard,ai]'
+streamlit>=1.37
+cryptography>=42
+requests>=2.31
+anthropic>=0.40

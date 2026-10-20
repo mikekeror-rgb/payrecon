@@ -1,0 +1,10 @@
+invoice_id,reference,amount,internal_status,created_at,customer_name
+L1,INV-0001,1,UNPAID,2026-10-19T08:00:00,C2B test customer
+L2,INV-0002,1,UNPAID,2026-10-19T08:00:00,C2B test customer
+L3,TEST6,1,UNPAID,2026-10-19T08:00:00,STK test customer
+L5,INV-0003,1500,UNPAID,2026-10-19T08:00:00,Customer who paid KSh 1
+L6,INV-0006,50,UNPAID,2026-10-20T08:00:00,Grace Wanjiku
+L7,INV-0007,50,UNPAID,2026-10-20T08:00:00,Peter Otieno
+L8,INV-0008,50,UNPAID,2026-10-20T08:00:00,Mary Achieng
+L9,INV-0009,750,UNPAID,2026-10-20T08:00:00,Customer who has not paid
+L10,TEST4,1,UNPAID,2026-10-19T08:00:00,STK test customer

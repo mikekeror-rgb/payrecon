@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+.env
+data/
+eval_results.json
+*.db
+*.db-wal
+*.db-shm
+.streamlit/secrets.toml

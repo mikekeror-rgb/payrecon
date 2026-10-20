@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payrecon"
+version = "0.9.0"
+description = "Payment reconciliation, AI-assisted investigation and guarded, audited recovery with live adapters for M-Pesa Daraja (sandbox-first)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+daraja = ["requests>=2.31"]  # only for live Daraja sandbox calls
+live = ["requests>=2.31", "cryptography>=42"]  # the gateway and SQL adapters: HTTP, encrypted phone numbers, reversal credential
+postgres = ["psycopg[binary]>=3.1"]  # only to point --db at Postgres
+ai = ["anthropic>=0.40"]  # only for --llm anthropic; the AI layer runs without it
+dashboard = ["streamlit>=1.37", "cryptography>=42", "requests>=2.31"]  # the web dashboard (python -m payrecon.recover dashboard)
+dev = ["pytest>=8"]
+all = ["requests>=2.31", "cryptography>=42", "anthropic>=0.40", "pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

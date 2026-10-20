@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest requests cryptography
+      - run: pytest -q
+      # Fails the build if the engine ever proposes an unsafe automatic action.
+      - run: PYTHONPATH=src python -m payrecon.evaluate --n 500 --seed 7
+      # Same gate for the AI layer, deterministic mode (no API key in CI): non-zero on any safety violation.
+      - run: PYTHONPATH=src python -m payrecon.ai.evaluate --n 500 --seed 7
+      # Chaos gate for the recovery executor: hostile simulated world, invariants checked against ground truth.
+      # Non-zero on any double charge, wrong apply, unapproved refund, retry overrun or missing write-ahead record,
+      # and also if the naive negative control stays clean (which would mean the world is too tame to prove anything).
+      - run: PYTHONPATH=src python -m payrecon.recovery.chaos --n 300 --seeds 1 2 3 4 5
+      - run: PYTHONPATH=src python -m payrecon.recovery.chaos --n 300 --seeds 11 12 13 --profile crashy
+      - run: PYTHONPATH=src python -m payrecon.recover demo --n 200
+      # The whole stack (SQL adapters, Daraja gateway, executor) against a local fake Daraja; non-zero if anything repeats.
+      - run: PYTHONPATH=src python -m payrecon.recover live-demo
