@@ -1,8 +1,82 @@
 # payrecon
 
-Payment reconciliation, AI-assisted investigation and safe transaction recovery for **M-Pesa Daraja** (sandbox-first). The money decisions are plain code; AI is limited to interpreting and prioritising exceptions, and every model answer is validated by code that can reject it.
+[![ci](https://github.com/mikekeror-rgb/payrecon/actions/workflows/ci.yml/badge.svg)](https://github.com/mikekeror-rgb/payrecon/actions/workflows/ci.yml)
+**Live demo: [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app)**
 
-> **Status: v0.9.** Deterministic reconciliation engine and action policy (v0.1), an AI investigation layer (v0.2), a **recovery executor** (v0.3), **live adapters** (v0.4: SQL books and ledger, a Daraja gateway for STK push and reversal, an outbox, encrypted payer numbers, `sandbox-check`) and a **webhook receiver** (v0.5: authenticated by a secret path, durable inbox, de-duplication, successes verified with Daraja before they touch the ledger) and **sandbox tools for reversals and C2B** (v0.6: `sandbox-check --reverse`, `c2b-register`, `sandbox-check --c2b-simulate`, a C2B validation endpoint). v0.7 connects the AI investigator to the live books and ledger (`investigate --db`, `plan --ai`); v0.8 records reversals payrecon did not start, so reversed money is never applied or refunded again; v0.9 adds a web dashboard (Streamlit) with a hostable demo. Several Daraja behaviours have now been checked against the live sandbox (token, STK push, STK query, a cancellation callback, and a success callback verified and recorded through the receiver; see [Checked against the live sandbox](#checked-against-the-live-sandbox-2026-10-19-first-run)); plus C2B registration and confirmation, and a reversal request and its (failed) result; a successful reversal has not been seen. Not built yet: real authentication (see [Roadmap](#roadmap)).
+**M-Pesa payment reconciliation that finds what went wrong, explains it in plain language, and fixes only what is safe to fix.** Built against Safaricom's Daraja API and tested against the live sandbox with real payments.
+
+A business that takes M-Pesa payments has to answer, every day: which invoices are really paid? Customers type the wrong reference, pay twice, pay the wrong amount; callbacks get lost; and, as this project found live, money can go back to the customer without the business being told. payrecon checks every payment against every invoice, ranks the problems by money at stake, applies the fixes that are provably safe, and asks a person about everything else.
+
+![The dashboard on the demo data](docs/dashboard.png)
+
+## Where the AI is, and where it is not
+
+The rule: **code and M-Pesa's own answers make every money decision; the model explains, ranks and proposes.**
+
+| Job | Done by | The model's part |
+|---|---|---|
+| Receive payments, verify them with M-Pesa | webhook receiver + status queries | none |
+| Match payments to invoices, classify each invoice | deterministic engine | none |
+| Decide what to do (apply, recheck, notify, refund, escalate) | policy code | may only suggest the same or a more cautious action |
+| Explain each problem; classify failure messages the rules do not know | templates and rules first | for what the rules leave unresolved |
+| Say which invoice an unlinked payment belongs to | code finds and scores candidates | chooses among near-tied candidates, or says NONE; confidence capped; always needs approval |
+| Apply, notify, push, refund | executor with idempotency keys, fresh-data guards, write-ahead records, audit log | none; machines can never approve |
+
+On real sandbox payments the model linked a payment whose reference was **"Shiku"** to **Grace Wanjiku**'s invoice ("a common Kikuyu nickname for Wanjiku") and declined to guess for **"school fees"**; the code handled **"for peter"** by itself without asking the model. The Shiku link then waited for a human approval. ([details](#the-model-on-real-m-pesa-data-2026-10-20))
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    D[M-Pesa Daraja] -- callbacks --> R[Webhook receiver<br/>store first, verify]
+    S[Statement lines<br/>incl. reversals] --> L[(Ledger)]
+    R --> L
+    B[(Invoices)] --> E[Reconciliation<br/>deterministic]
+    L --> E
+    E --> AI[AI investigator<br/>explains, proposes links]
+    E --> P[Planner<br/>policy]
+    AI -- proposals --> P
+    P -- refunds, AI links --> H[Human approver]
+    P -- provably safe --> X[Executor<br/>guards, idempotency, audit]
+    H --> X
+    X -- mark paid, notify --> B
+    X -- push, status, reversal --> D
+```
+
+## What the live M-Pesa sandbox taught it
+
+Two days against the real Daraja sandbox (19-20 Oct 2026) overturned assumptions a fake API could never have caught. Each live answer is now a regression test.
+
+* **Money moved without the system being told.** Safaricom reversed three real 1 KES test payments on its own; the ledger still said "paid", so the system was about to mark an invoice paid and approve refunding money already returned. Fixed with a `REVERSED` payment status, reversals imported from the statement, and guards that re-check fresh data before acting.
+* **A successful registration reported as a failure:** Daraja's C2B register answered `ResponseCode "00000000"`, not `"0"`.
+* **Callbacks are claims, not facts:** a success callback is recorded only after Daraja's own status query confirms it. When the query was rate-limited (HTTP 429, tighter than the documented limit), the payment waited and was recorded a minute later.
+* **Real payloads differ from the docs:** a `Balance` item with no value, payer names in C2B confirmations (stripped before storage), string result codes like `R000002`.
+* **Reversals:** the request, the asynchronous result and its matching work live; a *successful* reversal is blocked by Safaricom's shared, locked test credential (`8006`).
+
+## Evidence
+
+| | |
+|---|---|
+| Tests | 380, run in CI on every push |
+| Chaos test | hostile simulated world (lost callbacks, false failures, crashes at six points): **0** double charges, wrong applies, unapproved refunds or retry overruns; a naive executor in the same world fails |
+| Mutation testing | 76 deliberate bugs injected across the executor, adapters, webhook receiver and reversal handling; every one caught by a named test |
+| Model, synthetic data | unknown failure messages explained 0/28 → 19/28; link recall 0.73 → 0.80 at unchanged precision 0.96; **0** safety violations |
+| Postgres | schema and 35 constraint checks pass on PostgreSQL 16 |
+
+## Try it
+
+* **In the browser:** [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app). The demo is the real sandbox data with phone numbers masked; M-Pesa is offline there, so nothing anyone clicks can move money. Approve the Shiku decision, then *Apply fixes*.
+* **On your machine:**
+
+```bash
+pip install -e '.[dashboard,ai]'
+python -m payrecon.recover dashboard          # http://127.0.0.1:8501
+python -m payrecon.recover demo               # narrated run on 300 synthetic invoices, no setup
+```
+
+Everything below is the engineering detail: setup against your own Daraja sandbox, the design, results, and limits.
+
+> **Version history (v0.9).** Deterministic reconciliation engine and action policy (v0.1), an AI investigation layer (v0.2), a **recovery executor** (v0.3), **live adapters** (v0.4: SQL books and ledger, a Daraja gateway for STK push and reversal, an outbox, encrypted payer numbers, `sandbox-check`) and a **webhook receiver** (v0.5: authenticated by a secret path, durable inbox, de-duplication, successes verified with Daraja before they touch the ledger) and **sandbox tools for reversals and C2B** (v0.6: `sandbox-check --reverse`, `c2b-register`, `sandbox-check --c2b-simulate`, a C2B validation endpoint). v0.7 connects the AI investigator to the live books and ledger (`investigate --db`, `plan --ai`); v0.8 records reversals payrecon did not start, so reversed money is never applied or refunded again; v0.9 adds a web dashboard (Streamlit) with a hostable demo. Several Daraja behaviours have now been checked against the live sandbox (token, STK push, STK query, a cancellation callback, and a success callback verified and recorded through the receiver; see [Checked against the live sandbox](#checked-against-the-live-sandbox-2026-10-19-first-run)); plus C2B registration and confirmation, and a reversal request and its (failed) result; a successful reversal has not been seen. Not built yet: real authentication (see [Roadmap](#roadmap)).
 
 ## Setup: what to install
 
