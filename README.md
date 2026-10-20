@@ -1,11 +1,13 @@
 # payrecon
 
 [![ci](https://github.com/mikekeror-rgb/payrecon/actions/workflows/ci.yml/badge.svg)](https://github.com/mikekeror-rgb/payrecon/actions/workflows/ci.yml)
-**Live demo: [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app)**
+**Live demo: [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app)** · **Video: [2-minute walkthrough](https://www.loom.com/share/8a748f2dcdec494d8d00ac01fc39ea72)**
 
 **M-Pesa payment reconciliation that finds what went wrong, explains it in plain language, and fixes only what is safe to fix.** Built against Safaricom's Daraja API and tested against the live sandbox with real payments.
 
 A business that takes M-Pesa payments has to answer, every day: which invoices are really paid? Customers type the wrong reference, pay twice, pay the wrong amount; callbacks get lost; and, as this project found live, money can go back to the customer without the business being told. payrecon checks every payment against every invoice, ranks the problems by money at stake, applies the fixes that are provably safe, and asks a person about everything else.
+
+[![Watch the 2-minute walkthrough](https://cdn.loom.com/sessions/thumbnails/8a748f2dcdec494d8d00ac01fc39ea72-with-play.gif)](https://www.loom.com/share/8a748f2dcdec494d8d00ac01fc39ea72)
 
 ![The dashboard on the demo data](docs/dashboard.png)
 
@@ -65,6 +67,7 @@ Two days against the real Daraja sandbox (19-20 Oct 2026) overturned assumptions
 
 ## Try it
 
+* **Watch:** the [2-minute walkthrough](https://www.loom.com/share/8a748f2dcdec494d8d00ac01fc39ea72).
 * **In the browser:** [payrecon-demo.streamlit.app](https://payrecon-demo.streamlit.app). The demo is the real sandbox data with phone numbers masked; M-Pesa is offline there, so nothing anyone clicks can move money. Approve the Shiku decision, then *Apply fixes*.
 * **On your machine:**
 
