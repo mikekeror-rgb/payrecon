@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "payrecon"
-version = "0.10.0"
+version = "0.11.1"
 description = "Payment reconciliation, AI-assisted investigation and guarded, audited recovery with live adapters for M-Pesa Daraja (sandbox-first)"
 readme = "README.md"
 requires-python = ">=3.10"

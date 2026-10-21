@@ -239,8 +239,10 @@ class Dashboard:
 
         if getattr(self, "_payroll", None) is None:
             if self.offline:
-                self._payouts = SimulatedPayouts()
+                self._payouts = SimulatedPayouts(DEMO_REGISTERED)
                 self._payroll = PayrollService(self.db, self._payouts, PiiBox(None, allow_plaintext=True))
+                if not self._payroll.batches():
+                    self._seed_last_week()
             else:
                 from .livecli import OfflineGateway, build_gateway
 
@@ -250,6 +252,15 @@ class Dashboard:
                 self._payouts = None
                 self._payroll = PayrollService(self.db, port, pii)
         return self._payroll
+
+    def _seed_last_week(self) -> None:
+        """The demo starts with last week's payroll already paid, so this week's list has history to be checked
+        against: Peter's number has changed, and John, Brian and Aisha have never been paid before."""
+        p = self._payroll
+        p.create_batch("DEMO-LAST-WEEK", (EXAMPLES / "payroll_last_week.csv").read_text(), DEMO_APPROVER)
+        p.approve("DEMO-LAST-WEEK", DEMO_APPROVER, {DEMO_APPROVER: "APPROVER"}, "demo history", checked=True)
+        p.send("DEMO-LAST-WEEK", execute=True)
+        self._payouts.deliver(p)
 
     def payroll_send(self, batch_id: str) -> dict[str, Any]:
         """Send the queued lines; in the demo the simulated results arrive straight away."""
@@ -261,6 +272,14 @@ class Dashboard:
     def close(self) -> None:
         self.db.close()
         self.store.close()
+
+
+# The names M-Pesa has registered for the demo numbers (the simulator returns them, as Daraja's results do).
+# John Kamau's number belongs to someone else: the demo's wrong-person payment.
+DEMO_REGISTERED = {
+    "254712345678": "GRACE WANJIKU KAMAU", "254722000222": "PETER OTIENO", "254722000333": "PETER OTIENO",
+    "254733444555": "MARY A***", "254711223344": "JOSEPH MWANGI", "254700112233": "FAITH NJERI", "254798765432": "DANIEL KIPROP",
+}
 
 
 def reset_demo(folder: str) -> Dashboard:

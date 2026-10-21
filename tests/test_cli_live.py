@@ -482,7 +482,10 @@ def test_payroll_from_the_command_line_imports_approves_sends_and_settles_from_t
             code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
             assert code == 1 and "approve it first" in out and fd.calls_to("/mpesa/b2c/v3/paymentrequest") == []
             assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "ai-assistant")[0] == 1
-            assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike")[0] == 0
+            code, out = run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike")
+            assert code == 1 and "check before approving (2)" in out and "First payment" not in out and "NEW" in out
+            assert "not approved" in out and "--checked" in out
+            assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike", "--checked")[0] == 0
             code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43")
             assert "dry run: 2 payment(s)" in out and fd.calls_to("/mpesa/b2c/v3/paymentrequest") == []
             code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
@@ -499,6 +502,9 @@ def test_payroll_from_the_command_line_imports_approves_sends_and_settles_from_t
             code, out = run("payroll", "report", "--db", dbfile, "--batch", "W43")
             assert "FAILED 1, PAID 1; paid KSh 1,500 of KSh 2,700" in out and "needs attention" in out
             assert "2547****111" in out and "0722000111" not in out
+            assert "paid, but M-Pesa has this number as 'Jane Worker'" in out
+            code, out = run("payroll", "confirm-name", "--db", dbfile, "--batch", "W43", "--line", "2", "--as", "mike", "--right-person")
+            assert code == 0 and "right person, confirmed" in out
             code, out = run("payroll", "requeue", "--db", dbfile, "--batch", "W43", "--as", "mike")
             assert "1 failed line(s) queued again" in out
             run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
@@ -511,6 +517,6 @@ def test_payroll_cannot_send_without_credentials(tmp_path):
     dbfile = str(tmp_path / "app.db")
     with env(PAYRECON_APPROVERS="mike"):
         assert run("payroll", "import", "--db", dbfile, "--batch", "W43", "--file", str(tmp_path / "pay.csv"), "--as", "mike")[0] == 0
-        assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike")[0] == 0
+        assert run("payroll", "approve", "--db", dbfile, "--batch", "W43", "--as", "mike", "--checked")[0] == 0
         code, out = run("payroll", "send", "--db", dbfile, "--batch", "W43", "--execute")
         assert code == 2 and "nothing can be sent" in out

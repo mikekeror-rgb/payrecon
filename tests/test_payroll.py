@@ -101,10 +101,10 @@ def test_machines_and_strangers_cannot_approve(who, why):
 def test_a_batch_is_approved_once():
     s = svc()
     s.create_batch("W43", WORKERS, "mike")
-    s.approve("W43", "mike", BOSS)
+    s.approve("W43", "mike", BOSS, checked=True)
     assert s.batches()[0]["approved_by"] == "mike" and set(statuses(s).values()) == {"QUEUED"}
     with pytest.raises(PayrollError, match="not waiting for approval"):
-        s.approve("W43", "mike", BOSS)
+        s.approve("W43", "mike", BOSS, checked=True)
 
 
 # ---- sending ----------------------------------------------------------------------------------------------
@@ -112,7 +112,7 @@ def test_a_batch_is_approved_once():
 def _approved(port, workers=WORKERS):
     s = svc(port)
     assert not s.create_batch("W43", workers, "mike").errors
-    s.approve("W43", "mike", BOSS)
+    s.approve("W43", "mike", BOSS, checked=True)
     return s
 
 
@@ -184,7 +184,7 @@ def test_a_sender_that_stopped_mid_request_leaves_the_line_unknown_not_resent():
     port = SimulatedPayouts()
     s = svc(port, now=lambda: clock[0])
     s.create_batch("W43", WORKERS, "mike")
-    s.approve("W43", "mike", BOSS)
+    s.approve("W43", "mike", BOSS, checked=True)
     s.db.execute("UPDATE payouts SET status = 'SENDING', updated_at = ? WHERE line_no = 2", (clock[0],))  # the crash
     clock[0] += timedelta(minutes=11)
     s.send("W43", execute=True)
@@ -304,7 +304,7 @@ def test_the_gateway_sends_what_daraja_documents_and_the_receiver_settles_it():
                            b2c_timeout_url="https://h/daraja/b2c-timeout/t", read_timeout=3.0)
         s = PayrollService(db, gw, gw.pii)
         s.create_batch("W43", WORKERS, "mike")
-        s.approve("W43", "mike", BOSS)
+        s.approve("W43", "mike", BOSS, checked=True)
         r = s.send("W43", execute=True)
         assert r["accepted"] == 3 and len(fd.b2c_payments) == 3
         b = fd.b2c_payments[0]
@@ -314,6 +314,9 @@ def test_the_gateway_sends_what_daraja_documents_and_the_receiver_settles_it():
         for body in fd.b2c_payments:
             assert svc_.handle("POST", f"/daraja/b2c-result/{tok}", json.dumps(fd.b2c_result(body)).encode())[0] == 200
         assert s.report("W43")["counts"] == {"PAID": 3}
+        # the fake's results name "Jane Worker" for every number: none of them is on the list as Jane
+        assert {(r["name_check"], r["paid_to"]) for r in s.lines("W43")} == {("MISMATCH", "Jane Worker")}
+        assert len(s.report("W43")["attention"]) == 3
         stored = " ".join(r[0] for r in db.execute("SELECT payload FROM webhook_inbox").fetchall())
         assert "Jane Worker" not in stored and "254712345678" not in stored  # the payee's name and number are stripped
         svc_.handle("POST", f"/daraja/b2c-result/{tok}", json.dumps({"Result": {"ResultCode": 0, "OriginatorConversationID": "x"}}).encode())
@@ -344,6 +347,168 @@ def test_an_old_database_gains_the_payout_results_in_place(tmp_path):
     assert migrate_sqlite(db) == ["webhook_inbox: payout (B2C) results may now be received"]
     assert db.execute("SELECT COUNT(*) FROM webhook_inbox").fetchone()[0] == 1
     db.execute("INSERT INTO webhook_inbox (payload_sha256, kind, received_at, payload, status) VALUES ('h2','b2c-result','2026-10-20','{}','RECEIVED')")
+
+
+def test_a_database_from_v0_10_0_gains_the_name_check_columns_in_place(tmp_path):
+    db = Database.sqlite(str(tmp_path / "v0100.db"))
+    old = SQLITE_DDL.replace("""    name_check                 TEXT CHECK (name_check IS NULL OR name_check IN ('MATCH', 'MISMATCH', 'CONFIRMED', 'WRONG_PERSON')),
+    paid_to_enc                TEXT,
+""", "")
+    assert "name_check" not in old
+    db.script(old)
+    s = PayrollService(db, None, PiiBox(None, allow_plaintext=True))
+    db.execute("INSERT INTO payout_batches (batch_id, status, total, lines, created_by, created_at) VALUES ('W42','DRAFT','1500',1,'mike','2026-10-13')")
+    db.execute("INSERT INTO payouts (payout_id, batch_id, line_no, name, payee_key, msisdn_enc, msisdn_masked, amount, status, created_at, updated_at) "
+               "VALUES ('W42:2','W42',2,'Grace','k','x','2547****678','1500','PAID','2026-10-13','2026-10-13')")
+    done = migrate_sqlite(db)
+    assert any("name M-Pesa has" in d for d in done) and any("encrypted" in d for d in done)
+    assert s.lines("W42")[0]["name_check"] is None and migrate_sqlite(db) == []
+    with pytest.raises(Exception):
+        db.execute("UPDATE payouts SET name_check = 'MAYBE'")
+
+
+# ---- before approval: compared with everyone paid before ---------------------------------------------------
+
+def _paid_week(s, port, batch, text):
+    assert not s.create_batch(batch, text, "mike").errors
+    s.approve(batch, "mike", BOSS, checked=True)
+    s.send(batch, execute=True)
+    port.deliver(s)
+
+
+def _flags(s, batch):
+    return {f["name"]: f["flag"] for f in s.review(batch)}
+
+
+def test_a_changed_number_a_reused_number_and_a_new_number_are_flagged_before_approval():
+    port = SimulatedPayouts()
+    s = svc(port)
+    _paid_week(s, port, "W42", WORKERS)
+    this_week = ("name,phone,amount\n"
+                 "Grace Wanjiku,0712345678,1500\n"     # same as last week: no flag
+                 "Peter Otieno,0722000112,1200\n"      # last week 0722000111: changed
+                 "John Kamau,0733444555,1500\n"        # Mary's number last week: reused
+                 "Daniel Kiprop,0798765432,1250\n")    # never seen: new
+    s.create_batch("W43", this_week, "mike")
+    assert _flags(s, "W43") == {"Peter Otieno": "NUMBER_CHANGED", "John Kamau": "NUMBER_REUSED", "Daniel Kiprop": "NEW"}
+    why = {f["name"]: f["why"] for f in s.review("W43")}
+    assert "2547****111 last time (batch W42)" in why["Peter Otieno"] and "2547****112" in why["Peter Otieno"]
+    assert "last paid to Mary Achieng" in why["John Kamau"]
+
+
+def test_a_batch_with_flags_is_not_approved_until_a_person_says_they_checked():
+    port = SimulatedPayouts()
+    s = svc(port)
+    _paid_week(s, port, "W42", WORKERS)
+    s.create_batch("W43", WORKERS.replace("+254722000111", "0722000112"), "mike")
+    with pytest.raises(PayrollError, match="1 line\\(s\\) need checking.*Peter Otieno"):
+        s.approve("W43", "mike", BOSS)
+    assert s.batches()[0]["status"] == "DRAFT" and set(statuses(s).values()) == {"WAITING"}
+    s.approve("W43", "mike", BOSS, checked=True)
+    assert "1 flagged line(s) checked by mike" in s.db.execute("SELECT note FROM payout_batches WHERE batch_id = 'W43'").fetchone()[0]
+
+
+def test_an_unchanged_list_needs_no_extra_confirmation():
+    port = SimulatedPayouts()
+    s = svc(port)
+    _paid_week(s, port, "W42", WORKERS)
+    s.create_batch("W43", WORKERS, "mike")
+    assert s.review("W43") == []
+    s.approve("W43", "mike", BOSS)  # no flags: nothing extra to confirm
+
+
+def test_the_very_first_payroll_flags_every_number_as_new():
+    s = svc()
+    s.create_batch("W43", WORKERS, "mike")
+    assert set(_flags(s, "W43").values()) == {"NEW"} and len(s.review("W43")) == 3
+    with pytest.raises(PayrollError, match="3 line"):
+        s.approve("W43", "mike", BOSS)
+
+
+def test_only_paid_lines_count_as_history():
+    port = SimulatedPayouts()
+    s = svc(port)
+    _paid_week(s, port, "W42", "name,phone,amount\nGrace,0712340000,500\n")  # 0000: failed, nothing was paid
+    s.create_batch("W43", "name,phone,amount\nGrace,0712340000,500\n", "mike")
+    assert _flags(s, "W43") == {"Grace": "NEW"}
+
+
+def test_a_number_once_paid_to_the_wrong_person_is_never_trusted_again():
+    port = SimulatedPayouts({"254712345678": "JOSEPH MWANGI"})
+    s = svc(port)
+    _paid_week(s, port, "W42", "name,phone,amount\nGrace Wanjiku,0712345678,1500\n")
+    pid = s.lines("W42")[0]["payout_id"]
+    s.confirm_name(pid, "mike", BOSS, right_person=False)
+    s.create_batch("W43", "name,phone,amount\nGrace Wanjiku,0712345678,1500\n", "mike")
+    assert _flags(s, "W43") == {"Grace Wanjiku": "NEW"}  # last week's payment does not vouch for this number
+
+
+# ---- after payment: the name M-Pesa has for the number -----------------------------------------------------
+
+@pytest.mark.parametrize("listed, registered, same", [
+    ("Grace Wanjiku", "GRACE WANJIKU KAMAU", True),
+    ("Grace Wanjiku", "grace wanjiku", True),
+    ("Grace", "GRACE WANJIKU", True),
+    ("Mary Achieng", "MARY A***", True),
+    ("Peter O'Brien Otieno", "PETER OTIENO", True),
+    ("Grace Wanjiku", "GRACE OTIENO", False),
+    ("Shiku", "GRACE WANJIKU", False),
+    ("John Kamau", "JOSEPH MWANGI", False),
+    ("Grace Wanjiku", "", False),
+])
+def test_names_are_compared_loosely_but_a_different_person_does_not_match(listed, registered, same):
+    from payrecon.payroll import names_match
+    assert names_match(listed, registered) is same
+
+
+def test_a_payment_to_a_number_registered_to_someone_else_is_flagged_and_their_name_kept_sealed():
+    from cryptography.fernet import Fernet
+    db = Database.sqlite()
+    db.script(SQLITE_DDL)
+    port = SimulatedPayouts({"254712345678": "GRACE WANJIKU KAMAU", "254722000111": "JOSEPH MWANGI"})
+    s = PayrollService(db, port, PiiBox(Fernet.generate_key().decode()))
+    s.create_batch("W43", WORKERS, "mike")
+    s.approve("W43", "mike", BOSS, checked=True)
+    s.send("W43", execute=True)
+    port.deliver(s)
+    rows = {r["name"]: r for r in s.lines("W43")}
+    assert rows["Grace Wanjiku"]["name_check"] == "MATCH" and rows["Grace Wanjiku"]["paid_to"] is None  # a match keeps no name
+    assert (rows["Peter Otieno"]["status"], rows["Peter Otieno"]["name_check"], rows["Peter Otieno"]["paid_to"]) == ("PAID", "MISMATCH", "JOSEPH MWANGI")
+    assert rows["Mary Achieng"]["name_check"] is None  # M-Pesa sent no name: nothing compared, nothing claimed
+    raw = db.execute("SELECT paid_to_enc FROM payouts WHERE paid_to_enc IS NOT NULL").fetchall()
+    assert len(raw) == 1 and raw[0][0].startswith("enc1:") and "JOSEPH" not in raw[0][0]
+    assert [r["name"] for r in s.report("W43")["attention"]] == ["Peter Otieno"]
+
+
+def test_a_person_settles_a_name_mismatch_and_only_a_mismatch():
+    port = SimulatedPayouts({"254722000111": "PETER O. (MAMA PETER)", "254712345678": "JOSEPH MWANGI"})
+    s = _approved(port)
+    s.send("W43", execute=True)
+    port.deliver(s)
+    ids = {r["name"]: r["payout_id"] for r in s.lines("W43")}
+    with pytest.raises(PayrollError, match="machine"):
+        s.confirm_name(ids["Peter Otieno"], "ai-assistant", BOSS, right_person=True)
+    s.confirm_name(ids["Peter Otieno"], "mike", BOSS, right_person=True, note="his mother's line")
+    s.confirm_name(ids["Grace Wanjiku"], "mike", BOSS, right_person=False)
+    rows = {r["name"]: r for r in s.lines("W43")}
+    assert rows["Peter Otieno"]["name_check"] == "CONFIRMED" and "mother" in rows["Peter Otieno"]["detail"]
+    assert rows["Grace Wanjiku"]["name_check"] == "WRONG_PERSON" and "reverse" in rows["Grace Wanjiku"]["detail"]
+    assert [r["name"] for r in s.report("W43")["attention"]] == ["Grace Wanjiku"]  # stays in view until dealt with
+    with pytest.raises(PayrollError, match="no name mismatch"):
+        s.confirm_name(ids["Peter Otieno"], "mike", BOSS, right_person=False)  # already settled
+    with pytest.raises(PayrollError, match="no name mismatch"):
+        s.confirm_name(ids["Mary Achieng"], "mike", BOSS, right_person=True)
+
+
+def test_a_mismatch_never_changes_the_payment_itself():
+    port = SimulatedPayouts({"254712345678": "JOSEPH MWANGI"})
+    s = _approved(port)
+    s.send("W43", execute=True)
+    port.deliver(s)
+    rep = s.report("W43")
+    assert rep["counts"] == {"PAID": 3} and rep["paid_total"] == Decimal(4200)  # the money moved; the flag is for a person
+    s.send("W43", execute=True)
+    assert len(port.sent) == 3
 
 
 # ---- chaos: faults everywhere, still nobody is paid twice ------------------------------------------------------
@@ -416,7 +581,7 @@ def test_two_senders_at_once_still_pay_each_person_once(tmp_path):
     first = PayrollService(db, port, PiiBox(None, allow_plaintext=True))
     rows = "\n".join(f"W{i},07{20000000 + i * 31:08d},100" for i in range(20))
     first.create_batch("W43", "name,phone,amount\n" + rows + "\n", "mike")
-    first.approve("W43", "mike", BOSS)
+    first.approve("W43", "mike", BOSS, checked=True)
     services = [PayrollService(Database.sqlite(path), port, PiiBox(None, allow_plaintext=True)) for _ in range(4)]
     threads = [threading.Thread(target=x.send, args=("W43",), kwargs={"execute": True}) for x in services]
     for t in threads:

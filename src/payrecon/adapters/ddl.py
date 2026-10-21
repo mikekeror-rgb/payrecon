@@ -133,6 +133,8 @@ CREATE TABLE IF NOT EXISTS payouts (
     detail                     TEXT,
     created_at                 TEXT NOT NULL,
     updated_at                 TEXT NOT NULL,
+    name_check                 TEXT CHECK (name_check IS NULL OR name_check IN ('MATCH', 'MISMATCH', 'CONFIRMED', 'WRONG_PERSON')),
+    paid_to_enc                TEXT,
     UNIQUE (batch_id, payee_key)
 );
 CREATE INDEX IF NOT EXISTS payouts_conversation ON payouts (conversation_id);
@@ -157,6 +159,14 @@ _UPGRADES = (
 )
 
 
+# (table, column, declaration, what it adds): added in place, at the end, so older files keep their rows
+_NEW_COLUMNS = (
+    ("payouts", "name_check", "TEXT CHECK (name_check IS NULL OR name_check IN ('MATCH', 'MISMATCH', 'CONFIRMED', 'WRONG_PERSON'))",
+     "the name M-Pesa has for a paid number is compared with the list"),
+    ("payouts", "paid_to_enc", "TEXT", "the registered name of a mismatched payment is kept, encrypted"),
+)
+
+
 def migrate_sqlite(db) -> list[str]:
     """Bring an existing SQLite file up to this schema. SQLite cannot alter a CHECK constraint, so a table whose
     constraint is out of date is rebuilt under the current definition, rows copied, in one transaction.
@@ -166,6 +176,11 @@ def migrate_sqlite(db) -> list[str]:
         row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
         if row and marker not in row[0]:
             _rebuild(db, table)
+            done.append(f"{table}: {what}")
+    for table, column, decl, what in _NEW_COLUMNS:
+        row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+        if row and column not in {c[1] for c in db.execute(f"PRAGMA table_info({table})").fetchall()}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             done.append(f"{table}: {what}")
     if done:
         db.script(SQLITE_DDL)  # indexes and any new tables

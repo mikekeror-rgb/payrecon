@@ -1,0 +1,194 @@
+{
+ "about": "Cases that payrecon (Python) and payroll-console (TypeScript) must both pass, so the console shows exactly what payrecon would decide. Keep a copy in each repo; CI in each runs it.",
+ "version": 1,
+ "csv": [
+  {
+   "id": "good file, numbers normalised",
+   "csv": "name,phone,amount\nGrace Wanjiku,0712 345 678,1500\nPeter Otieno,+254722000111,1200\nMary Achieng,254733444555,1500\n",
+   "phones": [
+    "254712345678",
+    "254722000111",
+    "254733444555"
+   ],
+   "total": 4200,
+   "errors": []
+  },
+  {
+   "id": "other column names, dashes, thousands separator",
+   "csv": "Employee,Phone Number,Salary\nJane,0712-345-678,\"1,500\"\n",
+   "phones": [
+    "254712345678"
+   ],
+   "total": 1500,
+   "errors": []
+  },
+  {
+   "id": "blank lines are skipped",
+   "csv": "name,phone,amount\n\nJane,0712345678,100\n,,\n",
+   "phones": [
+    "254712345678"
+   ],
+   "total": 100,
+   "errors": []
+  },
+  {
+   "id": "every problem is listed at once",
+   "csv": "name,phone,amount\nJane,0812345678,1500\nJoe,0712345678,1.5\nAnn,0712345678,-5\n,0722000111,100\nBob,0733444555,abc\nTom,0711223344,999999\nSue,0712345678,700\n",
+   "errors": [
+    "line 2 (Jane): '0812345678' is not a Safaricom number",
+    "line 3 (Joe): amount 1.5 must be a whole number of shillings above zero",
+    "line 4 (Ann): amount -5 must be a whole number of shillings above zero",
+    "line 5 (no name): no name",
+    "line 6 (Bob): 'abc' is not an amount",
+    "line 7 (Tom): amount 999,999 is above the per-person limit of 150,000"
+   ],
+   "note": "Sue (line 8) is valid on her own: lines 3 and 4 used her number but were refused, so hers is not a duplicate."
+  },
+  {
+   "id": "the same number twice",
+   "csv": "name,phone,amount\nJane,0712345678,1500\nJoe,0712345678,800\n",
+   "errors": [
+    "line 3 (Joe): same number as line 2"
+   ]
+  },
+  {
+   "id": "missing columns",
+   "csv": "worker,mobile,pay\nJane,0712345678,100\n",
+   "errors": [
+    "the file needs columns for name, phone and amount (found: worker, mobile, pay)"
+   ]
+  },
+  {
+   "id": "empty file",
+   "csv": "name,phone,amount\n",
+   "errors": [
+    "the file has no payments in it"
+   ]
+  },
+  {
+   "id": "batch above the limit",
+   "csv": "name,phone,amount\nA Kim,0712345678,150000\nB Kim,0712345679,150000\nC Kim,0712345670,150000\nD Kim,0712345671,150000\nE Kim,0712345672,150000\nF Kim,0712345673,150000\nG Kim,0712345674,150000\nH Kim,0712345675,150000\nI Kim,0712345676,150000\nJ Kim,0712345677,150000\nK Kim,0722345678,150000\nL Kim,0722345679,150000\nM Kim,0722345670,150000\nN Kim,0722345671,150000\nO Kim,0722345672,150000\nP Kim,0722345673,150000\nQ Kim,0722345674,150000\nR Kim,0722345675,150000\nS Kim,0722345676,150000\nT Kim,0722345677,150000\nU Kim,0733345677,1\n",
+   "errors": [
+    "the batch total 3,000,001 is above the limit of 3,000,000"
+   ]
+  }
+ ],
+ "review": [
+  {
+   "id": "changed, reused and new numbers",
+   "history": [
+    {
+     "batch": "W42",
+     "name": "Grace Wanjiku",
+     "phone": "254712345678"
+    },
+    {
+     "batch": "W42",
+     "name": "Peter Otieno",
+     "phone": "254722000111"
+    },
+    {
+     "batch": "W42",
+     "name": "Mary Achieng",
+     "phone": "254733444555"
+    }
+   ],
+   "csv": "name,phone,amount\nGrace Wanjiku,0712345678,1500\nPeter Otieno,0722000112,1200\nJohn Kamau,0733444555,1500\nDaniel Kiprop,0798765432,1250\n",
+   "flags": {
+    "Peter Otieno": "NUMBER_CHANGED",
+    "John Kamau": "NUMBER_REUSED",
+    "Daniel Kiprop": "NEW"
+   },
+   "why": {
+    "Peter Otieno": "Peter Otieno was paid on 2547****111 last time (batch W42); this list says 2547****112. Confirm the new number with Peter Otieno",
+    "John Kamau": "this number was last paid to Mary Achieng (batch W42), not John Kamau",
+    "Daniel Kiprop": "first payment to this number: confirm it with the worker"
+   }
+  },
+  {
+   "id": "an unchanged list has no flags",
+   "history": [
+    {
+     "batch": "W42",
+     "name": "Grace Wanjiku",
+     "phone": "254712345678"
+    }
+   ],
+   "csv": "name,phone,amount\nGrace Wanjiku,0712345678,1500\n",
+   "flags": {}
+  },
+  {
+   "id": "the first payroll flags everyone as new",
+   "history": [],
+   "csv": "name,phone,amount\nGrace Wanjiku,0712345678,1500\nPeter Otieno,0722000111,1200\n",
+   "flags": {
+    "Grace Wanjiku": "NEW",
+    "Peter Otieno": "NEW"
+   }
+  },
+  {
+   "id": "a changed number with the same last digits",
+   "history": [
+    {
+     "batch": "W42",
+     "name": "Grace Wanjiku",
+     "phone": "254712345678"
+    }
+   ],
+   "csv": "name,phone,amount\nGrace Wanjiku,0712395678,1500\n",
+   "flags": {
+    "Grace Wanjiku": "NUMBER_CHANGED"
+   },
+   "why": {
+    "Grace Wanjiku": "Grace Wanjiku was paid on a different number (same last digits) last time (batch W42); this list says 2547****678. Confirm the new number with Grace Wanjiku"
+   }
+  }
+ ],
+ "names": [
+  [
+   "Grace Wanjiku",
+   "GRACE WANJIKU KAMAU",
+   true
+  ],
+  [
+   "Grace Wanjiku",
+   "grace wanjiku",
+   true
+  ],
+  [
+   "Grace",
+   "GRACE WANJIKU",
+   true
+  ],
+  [
+   "Mary Achieng",
+   "MARY A***",
+   true
+  ],
+  [
+   "Peter O'Brien Otieno",
+   "PETER OTIENO",
+   true
+  ],
+  [
+   "Grace Wanjiku",
+   "GRACE OTIENO",
+   false
+  ],
+  [
+   "Shiku",
+   "GRACE WANJIKU",
+   false
+  ],
+  [
+   "John Kamau",
+   "JOSEPH MWANGI",
+   false
+  ],
+  [
+   "Grace Wanjiku",
+   "",
+   false
+  ]
+ ]
+}

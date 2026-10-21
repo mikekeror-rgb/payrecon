@@ -204,6 +204,14 @@ def _show_lines(svc, batch: str, only: tuple[str, ...] = ()) -> None:
         print(f"  {r['line']:>4}  {r['name'][:24]:<24} {r['phone']:<12} {float(r['amount']):>10,.0f}  {r['status']:<9} {str(extra)[:70]}")
 
 
+def _show_review(svc, batch: str) -> None:
+    flags = svc.review(batch)
+    if flags:
+        print(f"check before approving ({len(flags)}):")
+        for f in flags:
+            print(f"  {f['line']:>4}  {f['name'][:24]:<24} {f['phone']:<12} {f['flag']:<15} {f['why']}")
+
+
 def cmd_payroll(args) -> int:
     from .payroll import PayrollError
 
@@ -220,6 +228,7 @@ def cmd_payroll(args) -> int:
                 return 1
             print(f"batch {args.batch}: {len(c.lines)} people, total KSh {c.total:,.0f}. Check it, then: payroll approve --batch {args.batch} --as <approver>")
             _show_lines(svc, args.batch)
+            _show_review(svc, args.batch)
         elif args.action == "show":
             for b in svc.batches() if not args.batch else [x for x in svc.batches() if x["batch"] == args.batch]:
                 print(f"{b['batch']}: {b['status']}, {b['lines']} people, KSh {float(b['total']):,.0f}, made by {b['created_by']}"
@@ -227,7 +236,12 @@ def cmd_payroll(args) -> int:
             if args.batch:
                 _show_lines(svc, args.batch)
         elif args.action == "approve":
-            svc.approve(args.batch, args.as_user, roles, args.note or "")
+            flags = svc.review(args.batch)
+            if flags and not args.checked:
+                _show_review(svc, args.batch)
+                print(f"not approved: check the {len(flags)} line(s) above with the workers, then run approve again with --checked")
+                return 1
+            svc.approve(args.batch, args.as_user, roles, args.note or "", checked=args.checked)
             print(f"approved {args.batch} as {args.as_user}. Send it with: payroll send --batch {args.batch} --execute")
         elif args.action == "send":
             if args.execute and gw is None:
@@ -247,10 +261,19 @@ def cmd_payroll(args) -> int:
             if rep["attention"]:
                 print("needs attention:")
                 _show_lines(svc, args.batch, ("FAILED", "UNKNOWN"))
+                for r in rep["attention"]:
+                    if r["name_check"] in ("MISMATCH", "WRONG_PERSON"):
+                        print(f"  {r['line']:>4}  {r['name'][:24]:<24} {r['phone']:<12} paid, but M-Pesa has this number as {r['paid_to']!r}"
+                              + (": check it was the right person (payroll confirm-name --line N --right-person, or without it if not)"
+                                 if r["name_check"] == "MISMATCH" else ": reported as the wrong person; ask Safaricom to reverse it"))
         elif args.action == "resolve":
             pid = f"{args.batch}:{args.line}"
             svc.resolve(pid, args.as_user, roles, paid=args.paid, receipt=args.receipt or "", note=args.note or "")
             print(f"line {args.line} of {args.batch} marked {'PAID' if args.paid else 'not paid (FAILED)'} by {args.as_user}")
+        elif args.action == "confirm-name":
+            svc.confirm_name(f"{args.batch}:{args.line}", args.as_user, roles, right_person=args.right_person, note=args.note or "")
+            print(f"line {args.line} of {args.batch}: " + ("right person, confirmed" if args.right_person
+                  else "recorded as paid to the wrong person; ask Safaricom to reverse it and pay the worker on the right number"))
         elif args.action == "requeue":
             print(f"{svc.requeue_failed(args.batch, args.as_user, roles)} failed line(s) queued again; send with: payroll send --batch {args.batch} --execute")
         elif args.action == "cancel":

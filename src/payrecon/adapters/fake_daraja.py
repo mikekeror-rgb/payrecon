@@ -239,7 +239,8 @@ class FakeDaraja:
         h._send(200, {"ConversationID": f"AG_B2C_{n:012d}", "OriginatorConversationID": b["OriginatorConversationID"],  # type: ignore[attr-defined]
                       "ResponseCode": "0", "ResponseDescription": "Accept the service request successfully."})
 
-    def b2c_result(self, body: dict[str, Any], *, ok: bool = True, receipt: str = "UJKB2C0001", code: int = 2040) -> dict[str, Any]:
+    def b2c_result(self, body: dict[str, Any], *, ok: bool = True, receipt: str = "UJKB2C0001", code: int = 2040,
+                   registered: str = "Jane Worker") -> dict[str, Any]:
         """The result Daraja would post later for an accepted B2C request (shape from the docs)."""
         return {"Result": {
             "ResultType": 0, "ResultCode": 0 if ok else code,
@@ -248,7 +249,7 @@ class FakeDaraja:
             "TransactionID": receipt if ok else "",
             "ResultParameters": {"ResultParameter": [
                 {"Key": "TransactionAmount", "Value": body["Amount"]}, {"Key": "TransactionReceipt", "Value": receipt},
-                {"Key": "ReceiverPartyPublicName", "Value": f"{body['PartyB']} - Jane Worker"},
+                {"Key": "ReceiverPartyPublicName", "Value": f"{body['PartyB']} - {registered}"},
                 {"Key": "TransactionCompletedDateTime", "Value": "20.10.2026 22:30:00"}]} if ok else {}}}
 
 

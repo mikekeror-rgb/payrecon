@@ -65,3 +65,7 @@ SELECT expect_fail('payroll: PAID without a receipt', $$UPDATE payouts SET statu
 SELECT expect_ok('payroll: PAID with a receipt', $$UPDATE payouts SET status='PAID', receipt='UJKB2C0001' WHERE payout_id='W43:2'$$);
 SELECT expect_fail('payroll: one receipt for two people', $$UPDATE payouts SET status='PAID', receipt='UJKB2C0001' WHERE payout_id='W43:3'$$);
 SELECT expect_fail('payroll: an unknown line status', $$UPDATE payouts SET status='MAYBE' WHERE payout_id='W43:3'$$);
+SELECT expect_fail('payroll: an unknown name check', $$UPDATE payouts SET name_check='PROBABLY' WHERE payout_id='W43:2'$$);
+SELECT expect_fail('payroll: a name mismatch without the registered name kept', $$UPDATE payouts SET name_check='MISMATCH' WHERE payout_id='W43:2'$$);
+SELECT expect_ok('payroll: a name mismatch with the sealed registered name', $$UPDATE payouts SET name_check='MISMATCH', paid_to_enc='enc1:x' WHERE payout_id='W43:2'$$);
+SELECT expect_ok('payroll: a person settles it', $$UPDATE payouts SET name_check='WRONG_PERSON' WHERE payout_id='W43:2'$$);

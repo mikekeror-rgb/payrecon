@@ -216,6 +216,9 @@ CREATE TABLE payouts (
     detail                     TEXT,
     created_at                 TIMESTAMPTZ NOT NULL,
     updated_at                 TIMESTAMPTZ NOT NULL,
+    name_check                 TEXT CHECK (name_check IS NULL OR name_check IN ('MATCH', 'MISMATCH', 'CONFIRMED', 'WRONG_PERSON')),
+    paid_to_enc                TEXT,
     UNIQUE (batch_id, payee_key),
+    CHECK (name_check <> 'MISMATCH' OR paid_to_enc IS NOT NULL),
     CHECK (status <> 'PAID' OR receipt IS NOT NULL)
 );

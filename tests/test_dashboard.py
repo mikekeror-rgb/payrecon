@@ -197,7 +197,7 @@ def test_an_applied_ai_link_counts_for_its_invoice_afterwards(tmp_path):
 
 
 
-def test_the_payroll_page_imports_approves_sends_and_shows_who_needs_checking(tmp_path):
+def test_the_payroll_page_imports_checks_approves_sends_and_shows_who_needs_checking(tmp_path):
     import os
 
     saved = sys.modules.get("streamlit"), os.environ.pop("PAYRECON_DASHBOARD_LOCAL", None)
@@ -208,10 +208,14 @@ def test_the_payroll_page_imports_approves_sends_and_shows_who_needs_checking(tm
         _ST.session_state["demo_folder"] = str(tmp_path)
         _ST.views = {"View": "Payroll"}
         out = _page()
-        assert "Payroll" in out and "simulated M-Pesa" in out and "Upload" in out
+        assert "Payroll" in out and "simulated M-Pesa" in out and "payroll already paid" in out
         _page({"Use the demo list"})
         out = _page()
         assert "Imported 8 people" in out and "Pay 8 people" in out
+        # before approval: compared with last week
+        assert "Check these 4 before approving" in out
+        assert "Number changed since last time" in out and "Peter Otieno was paid on 2547****333 last time" in out
+        assert out.count("First payment to this number") == 3  # John, Brian, Aisha
         _page({"Approve batch"})
         out = _page()
         assert "Approved by demo-approver" in out and "8 payment(s) ready to send" in out
@@ -220,9 +224,17 @@ def test_the_payroll_page_imports_approves_sends_and_shows_who_needs_checking(tm
         assert "7 sent and accepted" in out and "1 unknown" in out
         assert "Brian Mutua" in out and "Failed: nothing was paid" in out      # the 0000 number
         assert "Aisha Hassan" in out and "Unknown: check before doing anything" in out  # the 1111 number
+        # after payment: John's number is registered to someone else
+        assert "The name does not match" in out and "registered to JOSEPH MWANGI" in out
         p = _ST.session_state["dash"].payroll()
         batch = p.batches()[0]["batch"]
         assert p.report(batch)["counts"] == {"PAID": 6, "FAILED": 1, "UNKNOWN": 1}
+        checks = {r["name"]: r["name_check"] for r in p.lines(batch)}
+        assert checks["John Kamau"] == "MISMATCH" and checks["Grace Wanjiku"] == "MATCH" and checks["Mary Achieng"] == "MATCH"
+        john = [r for r in p.lines(batch) if r["name"] == "John Kamau"][0]["payout_id"]
+        _page({f"wp{john}"})
+        out = _page()
+        assert "wrong person" in out and "Paid to the wrong person: ask Safaricom to reverse it" in out
         pid = [r for r in p.lines(batch) if r["name"] == "Aisha Hassan"][0]["payout_id"]
         _page({f"no{pid}"})
         out = _page({"Send the 2 failed payment(s) again"})

@@ -16,6 +16,12 @@ The rules, each enforced here and covered by tests:
   arrives later still settles it.
 * Daraja's result is the only thing that makes a line PAID; an accepted request is just ACCEPTED.
 * A failed line is resent only when a person requeues it, under a new attempt number.
+* Before approval, every line is compared with past payments (review): a worker whose number changed since they were
+  last paid, a number last paid to someone else, or a number never paid before is flagged, and the batch cannot be
+  approved until a person confirms they checked those lines.
+* After payment, the name M-Pesa has registered for the number (ReceiverPartyPublicName in the result) is compared
+  with the name on the list. A mismatch cannot stop a payment that has happened; it flags it within minutes so a
+  person can confirm it or ask Safaricom to reverse it. Only mismatched names are kept, encrypted.
 
 What has not been checked against live Daraja: B2C uses the same Initiator and SecurityCredential as reversals, and
 the sandbox's shared `testapi` credential was locked (8006) when this was built. The request and result shapes come
@@ -26,6 +32,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -128,6 +135,37 @@ def check_csv(text: str, max_line: Decimal = MAX_LINE, max_batch: Decimal = MAX_
     return out
 
 
+def _name_tokens(name: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z*]+", (name or "").lower().replace("'", "")) if len(t) >= 2]
+
+
+def _token_eq(a: str, b: str) -> bool:
+    if "*" in a or "*" in b:  # a partly hidden name such as W***
+        pa, pb = a.split("*")[0], b.split("*")[0]
+        n = min(len(pa), len(pb))
+        return n > 0 and pa[:n] == pb[:n]
+    return a == b
+
+
+def names_match(listed: str, registered: str) -> bool:
+    """Does the name on the list fit the name M-Pesa has for the number? Registered names are often longer
+    ("GRACE WANJIKU KAMAU" for "Grace Wanjiku") or partly hidden; two shared names (or all of a one-word name) count.
+    Nicknames ("Shiku") do not match: they are flagged for a person, which is the point."""
+    lt, rt = _name_tokens(listed), _name_tokens(registered)
+    if not lt or not rt:
+        return False
+    hits = sum(1 for t in lt if any(_token_eq(t, r) for r in rt))
+    return hits >= min(2, len(lt), len(rt))
+
+
+def _registered_name(params: Mapping[str, Any]) -> str | None:
+    v = params.get("ReceiverPartyPublicName")
+    if not v:
+        return None
+    v = str(v)
+    return (v.split(" - ", 1)[1] if " - " in v else v).strip() or None
+
+
 def _payee_key(phone: str) -> str:
     return hashlib.sha256(f"payee:{phone}".encode()).hexdigest()[:32]
 
@@ -163,7 +201,41 @@ class PayrollService:
                      mask_msisdn(ln.phone), ln.amount, "WAITING", now, now))
         return checked
 
-    def approve(self, batch_id: str, user: str, approvers: Mapping[str, Any], note: str = "") -> None:
+    def review(self, batch_id: str) -> list[dict[str, Any]]:
+        """Lines to check before approving, compared with everyone paid before (PAID lines of other batches, except
+        payments a person marked as gone to the wrong person):
+        NUMBER_CHANGED  this worker was paid on a different number last time (a typo, or a number swapped)
+        NUMBER_REUSED   this number was last paid to someone with another name
+        NEW             nobody has been paid on this number before, and this name has no history"""
+        rows = self.db.execute("SELECT payout_id, line_no, name, payee_key, msisdn_masked FROM payouts WHERE batch_id = ? "
+                               "AND status <> 'CANCELLED' ORDER BY line_no", (batch_id,)).fetchall()
+        hist = self.db.execute("SELECT batch_id, name, payee_key, msisdn_masked FROM payouts WHERE batch_id <> ? AND status = 'PAID' "
+                               "AND (name_check IS NULL OR name_check <> 'WRONG_PERSON') ORDER BY updated_at DESC", (batch_id,)).fetchall()
+        by_name: dict[str, list[tuple[str, str, str]]] = {}
+        by_key: dict[str, tuple[str, str]] = {}
+        for b, n, key, masked in hist:
+            by_name.setdefault(" ".join(_name_tokens(n)), []).append((b, key, masked))
+            by_key.setdefault(key, (b, n))
+        out = []
+        for pid, ln, name, key, masked in rows:
+            before = by_name.get(" ".join(_name_tokens(name)))
+            flag = why = None
+            if before and all(k != key for _, k, _ in before):
+                b, _, old = before[0]
+                shown = f"{old}" if old != masked else "a different number (same last digits)"
+                flag, why = "NUMBER_CHANGED", f"{name} was paid on {shown} last time (batch {b}); this list says {masked}. Confirm the new number with {name}"
+            elif key in by_key and not names_match(name, by_key[key][1]):
+                b, other = by_key[key]
+                flag, why = "NUMBER_REUSED", f"this number was last paid to {other} (batch {b}), not {name}"
+            elif not before and key not in by_key:
+                flag, why = "NEW", "first payment to this number: confirm it with the worker"
+            if flag:
+                out.append({"payout_id": pid, "line": ln, "name": name, "phone": masked, "flag": flag, "why": why})
+        return out
+
+    def approve(self, batch_id: str, user: str, approvers: Mapping[str, Any], note: str = "", *, checked: bool = False) -> None:
+        """Approve the whole batch. If review() flags any line, the approver must say they checked those lines
+        (checked=True); otherwise nothing is approved and the flags are listed."""
         self._check_person(user, approvers)
         with self.db.tx():
             row = self.db.execute("SELECT status FROM payout_batches WHERE batch_id = ?", (batch_id,)).fetchone()
@@ -171,6 +243,13 @@ class PayrollService:
                 raise PayrollError(f"no batch called {batch_id}")
             if row[0] != "DRAFT":
                 raise PayrollError(f"batch {batch_id} is {row[0]}, not waiting for approval")
+            flags = self.review(batch_id)
+            if flags and not checked:
+                raise PayrollError(f"{len(flags)} line(s) need checking before this batch can be approved: "
+                                   + "; ".join(f"line {f['line']} {f['name']}: {f['why']}" for f in flags[:6])
+                                   + ("; ..." if len(flags) > 6 else "") + ". Check them, then approve again confirming you did")
+            if flags:
+                note = (note + "; " if note else "") + f"{len(flags)} flagged line(s) checked by {user}"
             now = self.now()
             self.db.execute("UPDATE payout_batches SET status = 'APPROVED', approved_by = ?, approved_at = ?, note = ? WHERE batch_id = ?",
                             (user, now, note, batch_id))
@@ -261,7 +340,7 @@ class PayrollService:
     def _find(self, res: Mapping[str, Any]) -> tuple | None:
         conv, orig = res.get("ConversationID"), res.get("OriginatorConversationID")
         return self.db.execute(
-            "SELECT payout_id, status, amount FROM payouts WHERE (conversation_id = ? AND conversation_id IS NOT NULL) "
+            "SELECT payout_id, status, amount, name FROM payouts WHERE (conversation_id = ? AND conversation_id IS NOT NULL) "
             "OR (originator_conversation_id = ? AND originator_conversation_id IS NOT NULL)", (conv, orig)).fetchone()
 
     def ingest_result(self, payload: Mapping[str, Any]) -> str | None:
@@ -275,7 +354,7 @@ class PayrollService:
             row = self._find(res)
             if row is None:
                 return None
-            pid, status, amount = row
+            pid, status, amount, name = row
             if status in ("PAID", "FAILED"):
                 return status  # a redelivery: already settled
             params = {p.get("Key"): p.get("Value") for p in
@@ -286,8 +365,16 @@ class PayrollService:
                 note = "paid"
                 if paid is not None and to_dec(paid) != to_dec(amount):
                     note = f"PAID {paid} but the line was {amount}: check with M-Pesa"
-                self.db.execute("UPDATE payouts SET status = 'PAID', receipt = ?, result_code = ?, result_desc = ?, detail = ?, updated_at = ? "
-                                "WHERE payout_id = ?", (receipt or None, code, str(res.get("ResultDesc", ""))[:300], note, self.now(), pid))
+                registered = _registered_name(params)
+                check, paid_to = None, None  # None: M-Pesa sent no name, so nothing was compared
+                if registered:
+                    check = "MATCH" if names_match(name, registered) else "MISMATCH"
+                    if check == "MISMATCH":
+                        paid_to = self.pii.seal(registered)  # kept only when it is needed to check the payment
+                        note += "; the name M-Pesa has for this number does not match the list: check it was the right person"
+                self.db.execute("UPDATE payouts SET status = 'PAID', receipt = ?, result_code = ?, result_desc = ?, detail = ?, name_check = ?, "
+                                "paid_to_enc = ?, updated_at = ? WHERE payout_id = ?",
+                                (receipt or None, code, str(res.get("ResultDesc", ""))[:300], note, check, paid_to, self.now(), pid))
                 return "PAID"
             self.db.execute("UPDATE payouts SET status = 'FAILED', result_code = ?, result_desc = ?, detail = ?, updated_at = ? WHERE payout_id = ?",
                             (code, str(res.get("ResultDesc", ""))[:300], "M-Pesa said no; nothing was paid", self.now(), pid))
@@ -299,7 +386,7 @@ class PayrollService:
         row = self._find(res or {})
         if row is None:
             return None
-        pid, status, _ = row
+        pid, status, _, _ = row
         if status in ("PAID", "FAILED"):
             return status
         self.db.execute("UPDATE payouts SET status = 'UNKNOWN', detail = ?, updated_at = ? WHERE payout_id = ? AND status IN ('ACCEPTED', 'SENDING', 'UNKNOWN')",
@@ -320,6 +407,19 @@ class PayrollService:
         if not n:
             raise PayrollError(f"{payout_id} is not UNKNOWN; only an unknown line can be settled by hand")
 
+    def confirm_name(self, payout_id: str, user: str, approvers: Mapping[str, Any], *, right_person: bool, note: str = "") -> None:
+        """A person checked a paid line whose M-Pesa name did not match: it was the right person after all (a
+        nickname, a relative's line), or the money went to the wrong person (ask Safaricom to reverse it; pay the
+        worker in a new batch on the right number). Wrong-person numbers are never trusted by review() again."""
+        self._check_person(user, approvers)
+        detail = (f"right person, confirmed by {user}" if right_person else
+                  f"paid to the wrong person, reported by {user}: ask Safaricom to reverse it, and pay the worker on the right number")
+        n = self.db.execute("UPDATE payouts SET name_check = ?, detail = ?, updated_at = ? WHERE payout_id = ? AND status = 'PAID' "
+                            "AND name_check = 'MISMATCH'",
+                            ("CONFIRMED" if right_person else "WRONG_PERSON", detail + (f": {note}" if note else ""), self.now(), payout_id)).rowcount
+        if not n:
+            raise PayrollError(f"{payout_id} has no name mismatch waiting to be checked")
+
     def requeue_failed(self, batch_id: str, user: str, approvers: Mapping[str, Any]) -> int:
         """Send failed lines again, as a new attempt. Only FAILED lines: M-Pesa said no, so nothing was paid."""
         self._check_person(user, approvers)
@@ -336,10 +436,23 @@ class PayrollService:
         return [dict(zip(("batch", "status", "total", "lines", "created_by", "created_at", "approved_by", "approved_at"), r)) for r in rows]
 
     def lines(self, batch_id: str) -> list[dict[str, Any]]:
-        rows = self.db.execute("SELECT payout_id, line_no, name, msisdn_masked, amount, status, attempt, receipt, result_code, result_desc, detail "
-                               "FROM payouts WHERE batch_id = ? ORDER BY line_no", (batch_id,)).fetchall()
-        keys = ("payout_id", "line", "name", "phone", "amount", "status", "attempt", "receipt", "code", "result", "detail")
-        return [dict(zip(keys, r)) for r in rows]
+        rows = self.db.execute("SELECT payout_id, line_no, name, msisdn_masked, amount, status, attempt, receipt, result_code, result_desc, detail, "
+                               "name_check, paid_to_enc FROM payouts WHERE batch_id = ? ORDER BY line_no", (batch_id,)).fetchall()
+        keys = ("payout_id", "line", "name", "phone", "amount", "status", "attempt", "receipt", "code", "result", "detail", "name_check")
+        out = []
+        for r in rows:
+            d = dict(zip(keys, r[:-1]))
+            d["paid_to"] = self._open_name(r[-1])
+            out.append(d)
+        return out
+
+    def _open_name(self, sealed: str | None) -> str | None:
+        if not sealed:
+            return None
+        try:
+            return self.pii.open(sealed)
+        except Exception:  # noqa: BLE001 - wrong or missing key: say so rather than fail the page
+            return "(sealed: set PAYRECON_PII_KEY to read it)"
 
     def report(self, batch_id: str) -> dict[str, Any]:
         rows = self.lines(batch_id)
@@ -351,7 +464,7 @@ class PayrollService:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             money[r["status"]] = money.get(r["status"], Decimal(0)) + to_dec(r["amount"])
         return {"batch": batch_id, "lines": len(rows), "counts": counts, "paid_total": money.get("PAID", Decimal(0)),
-                "total": sum(money.values(), Decimal(0)), "attention": [r for r in rows if r["status"] in ("FAILED", "UNKNOWN")]}
+                "total": sum(money.values(), Decimal(0)), "attention": [r for r in rows if r["status"] in ("FAILED", "UNKNOWN") or r["name_check"] in ("MISMATCH", "WRONG_PERSON")]}
 
 
 # ---- a stand-in for M-Pesa, for the demo and tests -----------------------------------------------------------
@@ -359,9 +472,11 @@ class PayrollService:
 class SimulatedPayouts:
     """Behaves like Daraja's B2C for the demo: numbers ending 0000 are 'not registered' (FAILED), numbers ending 1111
     time out after the request may have gone (UNKNOWN), everything else is paid. Results arrive when deliver() is
-    called, through the same ingest_result a real callback uses."""
+    called, through the same ingest_result a real callback uses. `registered` maps a number to the name M-Pesa
+    holds for it; for those numbers the result carries ReceiverPartyPublicName, as Daraja's does."""
 
-    def __init__(self) -> None:
+    def __init__(self, registered: Mapping[str, str] | None = None) -> None:
+        self.registered = dict(registered or {})
         self.sent: list[dict[str, Any]] = []
         self.pending: list[dict[str, Any]] = []
         self._n = 0
@@ -377,7 +492,9 @@ class SimulatedPayouts:
             "ResultType": 0, "ResultCode": 0 if ok else 2040,
             "ResultDesc": "The service request is processed successfully." if ok else "Receiver is not a registered M-PESA customer (simulated)",
             "OriginatorConversationID": originator_id, "ConversationID": conv, "TransactionID": f"SIM{self._n:07d}" if ok else "",
-            "ResultParameters": {"ResultParameter": [{"Key": "TransactionAmount", "Value": int(amount)}]} if ok else {}}})
+            "ResultParameters": {"ResultParameter": [{"Key": "TransactionAmount", "Value": int(amount)}]
+                                 + ([{"Key": "ReceiverPartyPublicName", "Value": f"{phone} - {self.registered[phone]}"}] if phone in self.registered else [])}
+            if ok else {}}})
         return conv, originator_id
 
     def deliver(self, service: PayrollService) -> int:

@@ -322,12 +322,17 @@ PAY_LABEL = {"PAID": ("Paid", "green"), "FAILED": ("Failed: nothing was paid", "
              "SENDING": ("Sending", "blue"), "CANCELLED": ("Cancelled", "grey")}
 
 
+FLAG_LABEL = {"NUMBER_CHANGED": ("Number changed since last time", "red"), "NUMBER_REUSED": ("This number was paid to someone else", "red"),
+              "NEW": ("First payment to this number", "amber")}
+NAME_LABEL = {"MATCH": "matches", "MISMATCH": "does not match", "CONFIRMED": "checked: right person", "WRONG_PERSON": "wrong person"}
+
+
 def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
     from payrecon.dashboard import EXAMPLES
     from payrecon.payroll import PayrollError
 
     p = d.payroll()
-    sub = ("Demo · simulated M-Pesa: numbers ending 0000 fail, 1111 time out · no real money moves" if demo
+    sub = ("Demo · simulated M-Pesa with last week's payroll already paid · numbers ending 0000 fail, 1111 time out · no real money moves" if demo
            else ("Your data · M-Pesa connected" if p.port else "Your data · no M-Pesa credentials: you can import and approve, not send"))
     st.markdown(f'<div class="pr-hero"><h1>Payroll</h1><p>Pay everyone in one approved batch instead of one by one. '
                 f'Nobody is paid twice, and every payment ends paid, failed or flagged for you to check.</p>'
@@ -342,7 +347,8 @@ def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
     # ---- step 1: the list ------------------------------------------------------------------------------
     st.markdown('<div class="pr-step">Step 1 · The list</div>', unsafe_allow_html=True)
     c1, c2 = st.columns([2, 1])
-    name = c2.text_input("Batch name", (f"DEMO-{_week()}" if demo else _week()) + ("" if not names else f"-{len(names) + 1}"))
+    base = f"DEMO-{_week()}" if demo else _week()
+    name = c2.text_input("Batch name", base if base not in names else f"{base}-{len(names) + 1}")
     up = c1.file_uploader("Spreadsheet saved as CSV: name, phone, amount", type=["csv"])
     text = up.getvalue().decode("utf-8", errors="replace") if up is not None else None
     b1, b2, _ = st.columns([1, 1, 3])
@@ -383,9 +389,17 @@ def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
     st.markdown('<div class="pr-step">Step 2 · Approve once</div>', unsafe_allow_html=True)
     if info["status"] == "DRAFT":
         st.write(f"**Pay {info['lines']} people a total of {_money(float(rep['total']))}?** Check the list below first.")
-        if st.button("Approve batch", type="primary"):
+        flags = p.review(batch)
+        checked = True
+        if flags:
+            st.markdown(f"**Check these {len(flags)} before approving** (compared with everyone paid before):")
+            for f in flags:
+                label, color = FLAG_LABEL[f["flag"]]
+                st.markdown(_card(color, label, f["name"], f["phone"], f["why"]), unsafe_allow_html=True)
+            checked = st.checkbox(f"I have checked these {len(flags)} number(s) with the workers")
+        if st.button("Approve batch", type="primary", disabled=not checked):
             try:
-                p.approve(batch, user, d.approvers)
+                p.approve(batch, user, d.approvers, checked=checked)
                 _say(f"Approved by {user}. Now send it.", "ok")
             except PayrollError as e:
                 _say(str(e), "warn")
@@ -418,6 +432,30 @@ def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
     if attention:
         st.markdown('<div class="pr-step">Needs you</div>', unsafe_allow_html=True)
         for r in attention:
+            if r["name_check"] in ("MISMATCH", "WRONG_PERSON"):
+                label = ("Paid, but to whom? The name does not match" if r["name_check"] == "MISMATCH"
+                         else "Paid to the wrong person: ask Safaricom to reverse it")
+                st.markdown(_card("red", label, r["name"], _money(float(r["amount"])),
+                                  f"{r['phone']} · M-Pesa has this number registered to {r['paid_to']} · receipt {r['receipt']}"),
+                            unsafe_allow_html=True)
+                if r["name_check"] == "MISMATCH":
+                    nc1, nc2, _ = st.columns([1, 1, 2])
+                    if nc1.button("Right person", key=f"rp{r['payout_id']}"):
+                        try:
+                            p.confirm_name(r["payout_id"], user, d.approvers, right_person=True)
+                            _say(f"{r['name']}: confirmed as the right person.", "ok")
+                        except PayrollError as e:
+                            _say(str(e), "warn")
+                        st.rerun()
+                    if nc2.button("Wrong person", key=f"wp{r['payout_id']}"):
+                        try:
+                            p.confirm_name(r["payout_id"], user, d.approvers, right_person=False)
+                            _say(f"{r['name']}: recorded as paid to the wrong person. Ask Safaricom to reverse it, and pay "
+                                 f"{r['name']} on the right number in a new batch.", "warn")
+                        except PayrollError as e:
+                            _say(str(e), "warn")
+                        st.rerun()
+                continue
             label, color = PAY_LABEL[r["status"]]
             why = r["result"] or r["detail"] or ""
             st.markdown(_card(color, label, r["name"], _money(float(r["amount"])), f"{r['phone']} · {why}"), unsafe_allow_html=True)
@@ -449,6 +487,7 @@ def payroll_page(d: Dashboard, user: str, demo: bool) -> None:
     with st.expander(f"Everyone in {batch} ({info['lines']})", expanded=info["status"] == "DRAFT"):
         st.dataframe([{"Line": r["line"], "Name": r["name"], "Phone": r["phone"], "Amount": float(r["amount"]),
                        "Status": PAY_LABEL.get(r["status"], (r["status"],))[0], "Receipt": r["receipt"] or "",
+                       "Name on M-Pesa": NAME_LABEL.get(r["name_check"], ""),
                        "Note": r["result"] or r["detail"] or ""} for r in p.lines(batch)], hide_index=True)
 
 
